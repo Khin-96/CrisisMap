@@ -213,18 +213,21 @@ def show_modern_dashboard(filters: Dict):
     
     with col_b:
         st.markdown("### TEMPORAL VECTORS")
-        dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
-        events = np.random.poisson(20, 30)
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=dates, y=events, marker_color='#000000'))
-        fig.update_layout(
-            height=300, margin=dict(l=0,r=0,t=0,b=0),
-            paper_bgcolor='white', plot_bgcolor='white',
-            showlegend=False
-        )
-        fig.update_xaxes(showgrid=False)
-        fig.update_yaxes(showgrid=True, gridcolor='#EEEEEE')
-        st.plotly_chart(fig, use_container_width=True)
+        if trends_data and trends_data.get("temporal_data"):
+            df_temporal = pd.DataFrame(trends_data["temporal_data"])
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=df_temporal["period"], y=df_temporal["total_events"], marker_color='#000000'))
+            fig.update_layout(
+                height=300, margin=dict(l=0,r=0,t=0,b=0),
+                paper_bgcolor='white', plot_bgcolor='white',
+                showlegend=False,
+                hovermode="x unified"
+            )
+            fig.update_xaxes(showgrid=False, tickfont=dict(size=10))
+            fig.update_yaxes(showgrid=True, gridcolor='#EEEEEE', tickfont=dict(size=10))
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+        else:
+            st.info("No temporal vectors detected.")
 
     # Table
     st.markdown("### RECENT LOGS")
@@ -255,45 +258,137 @@ def show_realtime_monitor(filters: Dict):
 
 def show_predictions_page(filters: Dict):
     show_minimalist_header("ML FORECASTS", "System state probability and hotspot prediction")
-    st.info("Neural network initialized. Analyzing vectors...")
     
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### PROBABILITY TENSOR")
-        preds = np.random.normal(50, 10, 14)
-        fig = px.area(y=preds, x=range(14))
-        fig.update_traces(line_color='#000000', fillcolor='rgba(0,0,0,0.1)')
-        fig.update_layout(height=400, paper_bgcolor='white', plot_bgcolor='white')
-        st.plotly_chart(fig, use_container_width=True)
+    country_param = {"country": filters["country"] if filters["country"] != "All" else None}
+    pred_data = fetch_data("/api/predictions/fatalities", country_param)
+    hotspot_preds = fetch_data("/api/predictions/hotspots", country_param)
+    
+    if pred_data and "predictions" in pred_data:
+        st.markdown(f"#### TREND PROJECTION :: {pred_data.get('predicted_trend', 'STABLE').upper()}")
         
-    with c2:
-        st.markdown("#### PREDICTIVE MAPPING")
-        m = folium.Map(location=[-1.0, 29.0], zoom_start=6, tiles="CartoDB positron")
-        folium.Marker([-1.5, 29.2], icon=folium.Icon(color='black', icon='info-sign')).add_to(m)
-        st_folium(m, width=500, height=400)
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.markdown("#### PROBABILITY TENSOR (FATALITIES)")
+            df_pred = pd.DataFrame(pred_data["predictions"])
+            fig = px.area(df_pred, x="date", y="predicted_fatalities")
+            fig.update_traces(line_color='#000000', fillcolor='rgba(0,0,0,0.1)')
+            fig.update_layout(
+                height=400, paper_bgcolor='white', plot_bgcolor='white',
+                margin=dict(l=0,r=0,t=20,b=0)
+            )
+            fig.update_xaxes(showgrid=False)
+            fig.update_yaxes(showgrid=True, gridcolor='#EEEEEE')
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            
+        with c2:
+            st.markdown("#### CONFIDENCE METRICS")
+            ModernUIComponents.create_metric_card("Historical Avg", f"{pred_data.get('historical_avg', 0):.2f}")
+            ModernUIComponents.create_metric_card("Model Profile", pred_data.get("model_used", "STOCHASTIC").split("_")[-1])
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("#### PREDICTIVE VECTORS")
+            if hotspot_preds and "hotspot_predictions" in hotspot_preds:
+                m = folium.Map(location=[-1.5, 29.2], zoom_start=7, tiles="CartoDB positron")
+                for hp in hotspot_preds["hotspot_predictions"]:
+                    folium.Marker(
+                        [hp["latitude"], hp["longitude"]],
+                        icon=folium.Icon(color='black', icon='warning', prefix='fa'),
+                        popup=f"Risk: {hp['risk_level'].upper()}"
+                    ).add_to(m)
+                st_folium(m, width=None, height=250)
+    else:
+        st.warning("Insufficient signal history to initialize ML models for this sector.")
 
 def show_advanced_analysis(filters: Dict):
     show_minimalist_header("DEEP ANALYSIS", "Recursive pattern investigation and driver synthesis")
-    t1, t2, t3 = st.tabs(["DRIVERS", "HUMANITARIAN", "NETWORK"])
+    t1, t2, t3 = st.tabs(["CONFLICT DRIVERS", "HUMANITARIAN DATA", "ACTOR NETWORK"])
+    
+    country_param = {"country": filters["country"] if filters["country"] != "All" else None}
     
     with t1:
-        ModernUIComponents.create_alert_box("Primary Driver identified: Resource Competition (82% confidence)", "info")
+        drivers = fetch_data("/api/analysis/drivers", country_param)
+        if drivers:
+            st.markdown("#### SYSTEMIC DRIVERS")
+            for driver in drivers[:3]:
+                ModernUIComponents.create_alert_box(f"{driver['driver']}: {driver['description']} (Impact: {int(driver['impact']*100)}%)", "info")
+        else:
+            st.info("Driver analysis requiring more signal data.")
+            
     with t2:
-        if st.button("RUN HDX SYNC PROTOCOL"):
-            requests.post(f"{API_BASE}/api/sync/regional")
-            st.success("SYNC COMPLETE")
+        st.markdown("#### HUMANITARIAN SYNCHRONIZATION")
+        col_s1, col_s2 = st.columns([1, 2])
+        with col_s1:
+            if st.button("RUN HDX SYNC PROTOCOL", use_container_width=True):
+                with st.spinner("Synchronizing with OCHA/IOM..."):
+                    requests.post(f"{API_BASE}/api/sync/regional")
+                    st.success("SYNC COMPLETE")
+        
+        hum_data = fetch_data("/api/analysis/humanitarian")
+        if hum_data:
+            df_hum = pd.DataFrame(hum_data)
+            fig = px.pie(df_hum, values='value', names='admin1', title="Displacement by Province (HDX Source)")
+            fig.update_traces(marker=dict(colors=['#000000', '#333333', '#666666', '#999999', '#CCCCCC']))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No humanitarian indicators in database. Run SYNC to fetch.")
+            
     with t3:
-        st.write("Node visualization in progress...")
+        network = fetch_data("/api/analysis/network", country_param)
+        if network and "actor_statistics" in network:
+            st.markdown("#### ACTOR INFLUENCE (BY FATALITIES)")
+            df_actors = pd.DataFrame(network["actor_statistics"])
+            fig = px.bar(df_actors.head(10), x="actor", y="fatalities", color_discrete_sequence=['#000000'])
+            fig.update_layout(paper_bgcolor='white', plot_bgcolor='white', margin=dict(l=0,r=0,t=20,b=0))
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            
+            if "network_analysis" in network and "edges" in network["network_analysis"]:
+                st.markdown("#### KNOWN CO-OCCURRENCE NODES")
+                df_edges = pd.DataFrame(network["network_analysis"]["edges"])
+                st.dataframe(df_edges, use_container_width=True)
+        else:
+            st.info("Actor relationship network requiring deeper ingestion history.")
 
 def show_alert_center(filters: Dict):
     show_minimalist_header("ALERT CENTER", "Anomaly detection and systemic outlier reports")
-    ModernUIComponents.create_alert_box("Anomalous activity detected in Sector 4. Trend exceeds sigma-3 threshold.", "error")
-    ModernUIComponents.create_alert_box("Data synchronization delayed for Uganda vector.", "warning")
+    
+    country_param = {"country": filters["country"] if filters["country"] != "All" else None}
+    anomalies = fetch_data("/api/alerts/anomalies", country_param)
+    
+    if anomalies and "key_insights" in anomalies:
+        for insight in anomalies["key_insights"]:
+            ModernUIComponents.create_alert_box(insight, "warning")
+            
+        if "statistical_anomalies" in anomalies and anomalies["statistical_anomalies"].get("anomalies"):
+            st.markdown("#### STATISTICAL OUTLIERS")
+            df_anom = pd.DataFrame(anomalies["statistical_anomalies"]["anomalies"])
+            st.dataframe(df_anom[["date", "value", "severity", "anomaly_type"]], use_container_width=True)
+    else:
+        st.info("No anomalous vectors currently detected in high-confidence buffers.")
 
 def show_reports_page(filters: Dict):
     show_minimalist_header("PROTOCOL REPORTS", "Automated intelligence summary and data serialization")
-    if st.button("INITIALIZE REPORT GENERATION"):
-        st.write("Generating serialized buffer...")
+    
+    country_param = {"country": filters["country"] if filters["country"] != "All" else None}
+    
+    if st.button("GENERATE STRATEGIC POLICY BRIEF"):
+        with st.spinner("Compiling multi-source intelligence..."):
+            brief = fetch_data("/api/reports/policy-brief", country_param)
+            if brief:
+                st.markdown(f"### {brief.get('title', 'Policy Brief')}")
+                st.markdown(brief.get("executive_summary", "Summary unavailable."))
+                
+                col_r1, col_r2 = st.columns(2)
+                with col_r1:
+                    st.markdown("#### RECOMMENDED ACTIONS")
+                    for recommendation in brief.get("recommendations", []):
+                        st.markdown(f"* {recommendation}")
+                with col_r2:
+                    st.markdown("#### RISK ASSESSMENT")
+                    st.markdown(brief.get("outlook", "Outlook unavailable."))
+                
+                st.download_button("DOWNLOAD AS TEXT", brief.get("executive_summary", ""), "crisis_report.txt")
+            else:
+                st.error("Report generation failed. System status: Offline.")
 
 def main():
     filters = create_minimalist_sidebar()
