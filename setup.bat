@@ -49,4 +49,3 @@ echo.
 echo Note:
 echo - Add your API keys to .env file
 echo - Update the database configuration as needed
-pause

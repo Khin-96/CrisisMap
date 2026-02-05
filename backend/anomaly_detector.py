@@ -604,16 +604,19 @@ class ConflictAnomalyDetector:
     def _calculate_baseline_statistics(self, values: pd.Series) -> Dict:
         """Calculate baseline statistics for anomaly detection"""
         
+        if values.empty:
+            return {}
+            
         return {
             "mean": float(values.mean()),
             "median": float(values.median()),
-            "std": float(values.std()),
+            "std": float(values.std()) if len(values) > 1 else 0.0,
             "min": float(values.min()),
             "max": float(values.max()),
             "q25": float(values.quantile(0.25)),
             "q75": float(values.quantile(0.75)),
-            "skewness": float(values.skew()),
-            "kurtosis": float(values.kurtosis())
+            "skewness": float(values.skew()) if len(values) > 2 else 0.0,
+            "kurtosis": float(values.kurtosis()) if len(values) > 2 else 0.0
         }
     
     def _generate_anomaly_insights(self, report: Dict) -> List[str]:

@@ -128,19 +128,38 @@ async def get_hotspots(country: Optional[str] = None):
 async def get_fatality_predictions(country: Optional[str] = None, days: int = 14):
     try:
         df = data_ingestion.fetch_acled_data(country=country)
-        ml_predictor.train_fatalities_model(df)
+        if df is None or df.empty:
+            return {"predictions": [], "model_used": "None", "prediction_period": f"{days} days"}
+            
+        train_result = ml_predictor.train_fatalities_model(df)
+        if "error" in train_result:
+             print(f"ML Training Error: {train_result['error']}")
+             return {"predictions": [], "model_used": "None", "prediction_period": f"{days} days", "error": train_result["error"]}
+             
         predictions = ml_predictor.predict_fatalities(df, days_ahead=days)
+        if "error" in predictions:
+             return {"predictions": [], "model_used": "None", "prediction_period": f"{days} days", "error": predictions["error"]}
+             
         return predictions
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/predictions/hotspots")
 async def get_hotspot_predictions(country: Optional[str] = None):
     try:
         df = data_ingestion.fetch_acled_data(country=country)
+        if df is None or df.empty:
+             return {"hotspot_predictions": [], "prediction_period": "7 days", "total_predicted_hotspots": 0, "high_risk_hotspots": 0}
         hotspots = ml_predictor.predict_hotspots(df)
+        if "error" in hotspots:
+             # Return empty structure if ML fails
+             return {"hotspot_predictions": [], "prediction_period": "7 days", "total_predicted_hotspots": 0, "high_risk_hotspots": 0, "error": hotspots["error"]}
         return hotspots
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/alerts/anomalies")

@@ -309,8 +309,23 @@ def show_advanced_analysis(filters: Dict):
         drivers = fetch_data("/api/analysis/drivers", country_param)
         if drivers:
             st.markdown("#### SYSTEMIC DRIVERS")
-            for driver in drivers[:3]:
-                ModernUIComponents.create_alert_box(f"{driver['driver']}: {driver['description']} (Impact: {int(driver['impact']*100)}%)", "info")
+            # Parse backend response structure: {'synthesized_drivers': {'top_drivers': [['name', {'average_score': X}], ...]}}
+            top_drivers = drivers.get("synthesized_drivers", {}).get("top_drivers", [])
+            
+            for item in top_drivers[:3]:
+                # Backend returns [driver_name, driver_data_dict]
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    driver_name = item[0]
+                    driver_data = item[1]
+                    impact = driver_data.get("average_score", 0)
+                else:
+                    # Fallback for unexpected structure
+                    driver_name = str(item)
+                    impact = 0
+
+                description = "Identified as a significant conflict driver based on multi-source correlation."
+                
+                ModernUIComponents.create_alert_box(f"{driver_name}: {description} (Impact: {int(impact*100)}%)", "info")
         else:
             st.info("Driver analysis requiring more signal data.")
             

@@ -28,6 +28,7 @@ class ConflictPredictor:
         feature_df = df.copy()
         
         # Temporal features
+        feature_df["event_date"] = pd.to_datetime(feature_df["event_date"])
         feature_df["year"] = feature_df["event_date"].dt.year
         feature_df["month"] = feature_df["event_date"].dt.month
         feature_df["day_of_year"] = feature_df["event_date"].dt.dayofyear
@@ -115,7 +116,7 @@ class ConflictPredictor:
         X_clean = X[mask]
         y_clean = y[mask]
         
-        if len(X_clean) < 50:
+        if len(X_clean) < 20:
             return {"error": "Insufficient data after outlier removal"}
         
         # Split data
@@ -431,14 +432,19 @@ class ConflictPredictor:
         }
     
     def _haversine_distance(self, lat1, lon1, lat2, lon2):
-        """Calculate distance between two points"""
+        """Calculate distance between two points (supports scalars and Series)"""
         R = 6371  # Earth's radius in kilometers
         
-        lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-        dlat = lat2 - lat1
-        dlon = lon2 - lon1
+        # Convert to radians (handles both float and pd.Series)
+        lat1_rad = np.radians(lat1)
+        lon1_rad = np.radians(lon1)
+        lat2_rad = np.radians(lat2)
+        lon2_rad = np.radians(lon2)
         
-        a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+        dlat = lat2_rad - lat1_rad
+        dlon = lon2_rad - lon1_rad
+        
+        a = np.sin(dlat/2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon/2)**2
         c = 2 * np.arcsin(np.sqrt(a))
         
         return R * c

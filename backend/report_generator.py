@@ -157,23 +157,22 @@ class ReportGenerator:
             risk_level = "Low"
         
         return {
-            "policy_brief": {
-                "title": f"Conflict Analysis Brief: {country}",
-                "date": datetime.now().strftime("%B %d, %Y"),
-                "executive_summary": f"In the past 30 days, {country} has experienced {recent_events} conflict events resulting in {recent_fatalities} fatalities. The current risk level is assessed as {risk_level}.",
-                "key_developments": [
-                    f"Total conflict events: {recent_events}",
-                    f"Total fatalities: {recent_fatalities}",
-                    f"Emerging hotspots: {', '.join(emerging_hotspots.keys())}",
-                    f"Risk level: {risk_level}"
-                ],
-                "recommendations": [
-                    "Increase monitoring in identified hotspot areas",
-                    "Engage with key actors in conflict zones",
-                    "Prepare humanitarian response for high-risk areas",
-                    "Support community-based early warning systems"
-                ],
-                "data_sources": ["ACLED", "UN datasets", "Local monitoring"],
-                "contact": "CrisisMap Analysis Team"
-            }
+            "title": f"Conflict Analysis Brief: {country}",
+            "date": datetime.now().strftime("%B %d, %Y"),
+            "executive_summary": f"In the past 30 days, {country} has experienced {recent_events} conflict events resulting in {recent_fatalities} fatalities. The current risk level is assessed as {risk_level}.",
+            "outlook": f"Given the volume of recent events ({recent_events}) and fatality trends, the outlook for the next cycle suggests {risk_level.lower()} volatility. Strategic monitoring of {', '.join(list(emerging_hotspots.keys())[:2])} is advised.",
+            "key_developments": [
+                f"Total conflict events: {recent_events}",
+                f"Total fatalities: {recent_fatalities}",
+                f"Emerging hotspots: {', '.join(emerging_hotspots.keys())}",
+                f"Risk level: {risk_level}"
+            ],
+            "recommendations": [
+                "Increase monitoring in identified hotspot areas",
+                "Engage with key actors in conflict zones",
+                "Prepare humanitarian response for high-risk areas",
+                "Support community-based early warning systems"
+            ],
+            "data_sources": ["ACLED", "UN datasets", "Local monitoring"],
+            "contact": "CrisisMap Analysis Team"
         }

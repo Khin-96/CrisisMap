@@ -14,7 +14,7 @@ class AdvancedDataIngestion:
         self.twitter_api_key = None
         self.satellite_api_key = None
         self.base_urls = {
-            "acled": "https://api.acleddata.com/v2",
+            "acled": "https://acleddata.com/api/acled/read",
             "twitter": "https://api.twitter.com/2",
             "sentinel": "https://scihub.copernicus.eu/dhus"
         }
