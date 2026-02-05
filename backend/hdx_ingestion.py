@@ -20,82 +20,71 @@ class HDXIngestor:
             "User-Agent": user_agent
         }
 
+    def _fetch_all_pages(self, endpoint: str, extra_params: Dict) -> List[Dict]:
+        """Fetch all pages from a HAPI endpoint"""
+        if not self.app_identifier:
+            print("HDX_APP_IDENTIFIER is missing. Please set it in .env")
+            return []
+
+        url = f"{self.base_url}{endpoint}"
+        limit = 10000
+        offset = 0
+        all_results = []
+        
+        base_params = {
+            "output_format": "json",
+            "app_identifier": self.app_identifier,
+            "limit": limit
+        }
+        params = {**base_params, **extra_params}
+        
+        print(f"Starting fetch from {endpoint} with params: {extra_params}")
+        
+        while True:
+            params["offset"] = offset
+            try:
+                response = requests.get(url, params=params, headers=self._get_headers())
+                response.raise_for_status()
+                data = response.json()
+                
+                if "data" not in data:
+                    print(f"Unexpected response format from {endpoint}")
+                    break
+                    
+                page_results = data["data"]
+                all_results.extend(page_results)
+                
+                print(f"Fetched {len(page_results)} records (Offset: {offset})")
+                
+                if len(page_results) < limit:
+                    break
+                    
+                offset += limit
+                
+            except Exception as e:
+                print(f"Error fetching page at offset {offset}: {e}")
+                break
+                
+        return all_results
+
     def fetch_operational_presence(self, location_code: str = "COD") -> pd.DataFrame:
         """
         Fetch Operational Presence (3W) data.
         aggregates number of organizations by sector and admin1.
-        
-        Args:
-            location_code: ISO3 code (e.g., 'COD' for DR Congo)
         """
-        if not self.app_identifier:
-            print("HDX_APP_IDENTIFIER is missing. Please set it in .env")
-            return pd.DataFrame()
-
-        endpoint = "/coordination-context/operational-presence"
-        url = f"{self.base_url}{endpoint}"
-        
-        params = {
-            "location_code": location_code,
-            "output_format": "json",
-            "offset": 0,
-            "limit": 10000, # Max limit per docs
-            "app_identifier": self.app_identifier
-        }
-        
-        try:
-            print(f"Fetching Operational Presence for {location_code}...")
-            response = requests.get(url, params=params, headers=self._get_headers())
-            response.raise_for_status()
-            data = response.json()
-            
-            if not data:
-                return pd.DataFrame()
-                
-            df = pd.DataFrame(data)
-            return df
-            
-        except Exception as e:
-            print(f"Error fetching operational presence: {e}")
-            return pd.DataFrame()
+        results = self._fetch_all_pages(
+            "/coordination-context/operational-presence",
+            {"location_code": location_code}
+        )
+        return pd.DataFrame(results) if results else pd.DataFrame()
 
     def fetch_population_data(self, location_code: str = "COD") -> pd.DataFrame:
-        """
-        Fetch Population data.
-        
-        Args:
-            location_code: ISO3 code (e.g., 'COD' for DR Congo)
-        """
-        if not self.app_identifier:
-            print("HDX_APP_IDENTIFIER is missing.")
-            return pd.DataFrame()
-
-        endpoint = "/population-social/population"
-        url = f"{self.base_url}{endpoint}"
-        
-        params = {
-            "location_code": location_code,
-            "output_format": "json",
-            "offset": 0,
-            "limit": 10000,
-            "app_identifier": self.app_identifier
-        }
-        
-        try:
-            print(f"Fetching Population Data for {location_code}...")
-            response = requests.get(url, params=params, headers=self._get_headers())
-            response.raise_for_status()
-            data = response.json()
-            
-            if not data:
-                return pd.DataFrame()
-                
-            df = pd.DataFrame(data)
-            return df
-            
-        except Exception as e:
-            print(f"Error fetching population data: {e}")
-            return pd.DataFrame()
+        """Fetch Population data."""
+        results = self._fetch_all_pages(
+            "/population-social/population",
+            {"location_code": location_code}
+        )
+        return pd.DataFrame(results) if results else pd.DataFrame()
 
     def sync_data(self, country_iso3: str = "COD"):
         """Sync HAPI data to local DB"""
@@ -169,8 +158,18 @@ class HDXIngestor:
 
 def run_regional_sync():
     ingestor = HDXIngestor()
-    # Default to Great Lakes / DRC for now
-    ingestor.sync_data("COD")
+    # Great Lakes Region countries
+    countries = ["COD", "UGA", "RWA", "BDI", "SSD"]
+    print(f"Starting regional sync for: {countries}")
+    
+    for iso3 in countries:
+        try:
+            print(f"\n--- Syncing {iso3} ---")
+            ingestor.sync_data(iso3)
+        except Exception as e:
+            print(f"Failed to sync {iso3}: {e}")
+            
+    print("\nRegional sync completed.")
 
 if __name__ == "__main__":
     run_regional_sync()
