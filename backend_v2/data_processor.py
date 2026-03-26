@@ -3,8 +3,9 @@ import numpy as np
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import logging
-from database import DatabaseManager
+from database_sqlite import DatabaseManager
 from csv_adapter import CSVAdapter
+from acled_adapter import ACLEDAdapter
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,7 @@ class DataProcessor:
     def __init__(self):
         self.db_manager = None
         self.csv_adapter = CSVAdapter()
+        self.acled_adapter = ACLEDAdapter()
     
     async def _get_db_manager(self):
         """Get database manager instance"""
@@ -60,6 +62,48 @@ class DataProcessor:
             
         except Exception as e:
             logger.error(f"Failed to process CSV data: {e}")
+            raise
+    
+    async def process_acled_data(self, filters: Dict[str, Any] = None, max_records: int = 5000) -> int:
+        """Fetch and process data from ACLED API"""
+        try:
+            db = await self._get_db_manager()
+            
+            # Fetch data from ACLED
+            records = self.acled_adapter.fetch_paginated_data(filters, max_records)
+            
+            if not records:
+                logger.warning("No records returned from ACLED API")
+                return 0
+                
+            # Convert and clean data
+            df_processed = self.acled_adapter.standardize_data(records)
+            
+            # Reuse validation logic if needed
+            validation_report = self.csv_adapter.validate_processed_data(df_processed)
+            
+            if not validation_report['is_valid']:
+                logger.warning(f"ACLED data validation warnings: {validation_report['warnings']}")
+                # We skip critical error if we trust ACLED enough, or handle accordingly
+            
+            # Add metadata
+            import uuid
+            fetch_id = f"acled_{uuid.uuid4().hex[:8]}"
+            df_processed['upload_id'] = fetch_id
+            df_processed['data_source'] = 'acled_api'
+            df_processed['processed_at'] = datetime.now().isoformat()
+            
+            # Convert to records for database insertion
+            events = df_processed.to_dict('records')
+            
+            # Insert into database
+            inserted_count = await db.insert_events(events)
+            
+            logger.info(f"Successfully processed and stored {inserted_count} ACLED records")
+            return inserted_count
+            
+        except Exception as e:
+            logger.error(f"Failed to process ACLED data: {e}")
             raise
     
     async def calculate_trends(

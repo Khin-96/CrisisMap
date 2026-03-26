@@ -61,16 +61,27 @@ class CSVAdapter:
             
             for encoding in encodings:
                 try:
-                    if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
-                        df = pd.read_excel(file_path)
+                    if file_path.lower().endswith(('.xlsx', '.xls')):
+                        try:
+                            with pd.ExcelFile(file_path) as xl:
+                                if xl.sheet_names:
+                                    df = xl.parse(xl.sheet_names[0])
+                                else:
+                                    raise ValueError("No worksheets found in Excel")
+                        except Exception as excel_err:
+                            logger.warning(f"Excel read failed for {file_path}, trying CSV fallback: {excel_err}")
+                            df = pd.read_csv(file_path, encoding=encoding, on_bad_lines='skip')
                     else:
                         df = pd.read_csv(file_path, encoding=encoding)
                     break
                 except UnicodeDecodeError:
                     continue
+                except Exception as e:
+                    logger.error(f"Failed to read file with encoding {encoding}: {e}")
+                    continue
             
             if df is None:
-                raise ValueError("Could not read file with any supported encoding")
+                raise ValueError("Could not read file with any supported encoding/method")
             
             # Detect column mappings
             self.detected_mappings = self._detect_column_mappings(df.columns.tolist())

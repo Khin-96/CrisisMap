@@ -6,6 +6,8 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 
+type DataType = 'acled_events' | 'cast_predictions'
+
 interface ColumnMapping {
   [standardColumn: string]: string
 }
@@ -20,15 +22,70 @@ interface CSVAnalysis {
 }
 
 interface UploadStatus {
-  upload_id: string
+  upload_id?: string
+  fetch_id?: string
   status: string
   progress: number
   message: string
   records_processed?: number
+  records_stored?: number
   analysis?: CSVAnalysis
 }
 
+const DATA_TYPE_OPTIONS = [
+  {
+    value: 'acled_events' as DataType,
+    label: 'ACLED Conflict Events',
+    description: 'Historical conflict events with location, actors, fatalities.',
+    color: 'border-red-500 bg-red-50',
+    activeColor: 'border-red-600 bg-red-100 ring-2 ring-red-400',
+    requiredColumns: [
+      { key: 'event_date', label: 'Event Date', description: 'Date of the event (YYYY-MM-DD)' },
+      { key: 'latitude', label: 'Latitude', description: 'Decimal latitude coordinate' },
+      { key: 'longitude', label: 'Longitude', description: 'Decimal longitude coordinate' },
+      { key: 'event_type', label: 'Event Type', description: 'Category of conflict event' },
+      { key: 'fatalities', label: 'Fatalities', description: 'Number of fatalities (numeric)' },
+    ],
+    optionalColumns: [
+      { key: 'location', label: 'Location', description: 'Place name' },
+      { key: 'actor1', label: 'Actor 1', description: 'Primary actor' },
+      { key: 'actor2', label: 'Actor 2', description: 'Secondary actor' },
+      { key: 'country', label: 'Country', description: 'Country name' },
+      { key: 'notes', label: 'Notes', description: 'Additional context' },
+    ],
+    uploadEndpoint: '/api/upload/csv',
+    analyzeEndpoint: '/api/upload/analyze',
+    pollEndpoint: (id: string) => `/api/upload/status/${id}`,
+    idField: 'upload_id',
+  },
+  {
+    value: 'cast_predictions' as DataType,
+    label: 'CAST Predictions',
+    description: 'ACLED CAST conflict forecast data (expected, low, high forecasts by period).',
+    color: 'border-blue-500 bg-blue-50',
+    activeColor: 'border-blue-600 bg-blue-100 ring-2 ring-blue-400',
+    requiredColumns: [
+      { key: 'country', label: 'Country', description: 'Country name' },
+      { key: 'period', label: 'Period', description: 'Forecast period date (YYYY-MM-DD)' },
+      { key: 'expected_forecast', label: 'Expected Forecast', description: 'Expected number of events' },
+    ],
+    optionalColumns: [
+      { key: 'id', label: 'ID', description: 'Geographic ID (e.g. global/Afghanistan)' },
+      { key: 'level', label: 'Level', description: 'Geographic level (global, country, admin1)' },
+      { key: 'admin1', label: 'Admin1', description: 'First-level administrative division' },
+      { key: 'outcome', label: 'Outcome', description: 'Type of violence outcome' },
+      { key: 'low_forecast', label: 'Low Forecast', description: 'Lower bound forecast' },
+      { key: 'high_forecast', label: 'High Forecast', description: 'Upper bound forecast' },
+    ],
+    uploadEndpoint: '/api/upload/cast-csv',
+    analyzeEndpoint: '/api/upload/analyze',
+    pollEndpoint: (id: string) => `/api/cast/fetch/${id}`,
+    idField: 'fetch_id',
+  },
+]
+
 export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (uploadId: string) => void }) {
+  const [dataType, setDataType] = useState<DataType>('acled_events')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [uploadStatus, setUploadStatus] = useState<UploadStatus | null>(null)
   const [analysis, setAnalysis] = useState<CSVAnalysis | null>(null)
@@ -37,21 +94,22 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
   const [showMappingInterface, setShowMappingInterface] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
 
-  const requiredColumns = [
-    { key: 'event_date', label: 'Event Date', description: 'Date of the conflict event (YYYY-MM-DD)' },
-    { key: 'latitude', label: 'Latitude', description: 'Latitude coordinate (decimal degrees)' },
-    { key: 'longitude', label: 'Longitude', description: 'Longitude coordinate (decimal degrees)' },
-    { key: 'event_type', label: 'Event Type', description: 'Type of conflict event' },
-    { key: 'fatalities', label: 'Fatalities', description: 'Number of fatalities (numeric)' }
-  ]
+  const activeConfig = DATA_TYPE_OPTIONS.find(o => o.value === dataType)!
 
-  const optionalColumns = [
-    { key: 'location', label: 'Location', description: 'Place name or location description' },
-    { key: 'actor1', label: 'Actor 1', description: 'Primary conflict actor' },
-    { key: 'actor2', label: 'Actor 2', description: 'Secondary conflict actor' },
-    { key: 'country', label: 'Country', description: 'Country where event occurred' },
-    { key: 'notes', label: 'Notes', description: 'Additional context or description' }
-  ]
+  const resetState = useCallback(() => {
+    setSelectedFile(null)
+    setAnalysis(null)
+    setUploadStatus(null)
+    setShowMappingInterface(false)
+    setCustomMappings({})
+    setIsUploading(false)
+    setIsAnalyzing(false)
+  }, [])
+
+  const handleDataTypeChange = useCallback((type: DataType) => {
+    setDataType(type)
+    resetState()
+  }, [resetState])
 
   const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -66,87 +124,76 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
 
   const analyzeFile = useCallback(async () => {
     if (!selectedFile) return
-
     setIsAnalyzing(true)
     try {
       const formData = new FormData()
       formData.append('file', selectedFile)
-
-      const response = await fetch('http://localhost:8000/api/upload/analyze', {
+      const response = await fetch(`http://localhost:8000${activeConfig.analyzeEndpoint}`, {
         method: 'POST',
-        body: formData
+        body: formData,
       })
-
-      if (!response.ok) {
-        throw new Error(`Analysis failed: ${response.statusText}`)
-      }
-
-      const analysisResult: CSVAnalysis = await response.json()
-      setAnalysis(analysisResult)
-
-      // If there are missing required columns, show mapping interface
-      if (analysisResult.missing_required.length > 0) {
+      if (!response.ok) throw new Error(`Analysis failed: ${response.statusText}`)
+      const result: CSVAnalysis = await response.json()
+      setAnalysis(result)
+      if (result.missing_required.length > 0) {
         setShowMappingInterface(true)
-        // Initialize custom mappings with detected mappings
-        setCustomMappings(analysisResult.detected_mappings)
+        setCustomMappings(result.detected_mappings)
       }
     } catch (error) {
-      console.error('Analysis failed:', error)
+      console.error('Analysis error:', error)
       alert(`Failed to analyze file: ${error}`)
     } finally {
       setIsAnalyzing(false)
     }
-  }, [selectedFile])
+  }, [selectedFile, activeConfig])
 
   const uploadFile = useCallback(async () => {
     if (!selectedFile) return
-
     setIsUploading(true)
     try {
       const formData = new FormData()
       formData.append('file', selectedFile)
-      
-      // Add custom mappings if any
       if (Object.keys(customMappings).length > 0) {
         formData.append('custom_mappings', JSON.stringify(customMappings))
       }
 
-      const response = await fetch('http://localhost:8000/api/upload/csv', {
+      const response = await fetch(`http://localhost:8000${activeConfig.uploadEndpoint}`, {
         method: 'POST',
-        body: formData
+        body: formData,
+      })
+      if (!response.ok) throw new Error(`Upload failed: ${response.statusText}`)
+      const result = await response.json()
+      const jobId = result[activeConfig.idField] || result.upload_id || result.fetch_id
+
+      setUploadStatus({
+        ...result,
+        progress: result.progress ?? 0,
+        status: result.status ?? 'processing',
+        message: result.message ?? 'Processing...',
       })
 
-      if (!response.ok) {
-        throw new Error(`Upload failed: ${response.statusText}`)
-      }
-
-      const result = await response.json()
-      setUploadStatus(result)
-
-      // Poll for status updates
-      pollUploadStatus(result.upload_id)
+      pollStatus(jobId)
     } catch (error) {
-      console.error('Upload failed:', error)
+      console.error('Upload error:', error)
       alert(`Upload failed: ${error}`)
       setIsUploading(false)
     }
-  }, [selectedFile, customMappings])
+  }, [selectedFile, customMappings, activeConfig])
 
-  const pollUploadStatus = useCallback(async (uploadId: string) => {
+  const pollStatus = useCallback(async (jobId: string) => {
     const poll = async () => {
       try {
-        const response = await fetch(`http://localhost:8000/api/upload/status/${uploadId}`)
+        const response = await fetch(`http://localhost:8000${activeConfig.pollEndpoint(jobId)}`)
         if (response.ok) {
           const status: UploadStatus = await response.json()
           setUploadStatus(status)
-
           if (status.status === 'completed') {
             setIsUploading(false)
-            onUploadComplete?.(uploadId)
+            onUploadComplete?.(jobId)
           } else if (status.status === 'error') {
             setIsUploading(false)
-          } else if (status.status === 'processing') {
-            setTimeout(poll, 2000) // Poll every 2 seconds
+          } else if (['processing', 'fetching', 'queued'].includes(status.status)) {
+            setTimeout(poll, 2000)
           } else if (status.status === 'needs_mapping') {
             setIsUploading(false)
             if (status.analysis) {
@@ -157,32 +204,59 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
           }
         }
       } catch (error) {
-        console.error('Failed to get upload status:', error)
+        console.error('Poll error:', error)
         setIsUploading(false)
       }
     }
     poll()
-  }, [onUploadComplete])
+  }, [activeConfig, onUploadComplete])
 
   const updateMapping = useCallback((standardColumn: string, sourceColumn: string) => {
-    setCustomMappings(prev => ({
-      ...prev,
-      [standardColumn]: sourceColumn
-    }))
+    setCustomMappings(prev => ({ ...prev, [standardColumn]: sourceColumn }))
   }, [])
 
-  const canUpload = selectedFile && (!showMappingInterface || 
-    requiredColumns.every(col => customMappings[col.key]))
+  const canUpload = selectedFile && (!showMappingInterface ||
+    activeConfig.requiredColumns.every(col => customMappings[col.key]))
+
+  const completedRecords = uploadStatus?.records_processed ?? uploadStatus?.records_stored
 
   return (
     <div className="space-y-6">
+      {/* Data Type Selector */}
+      <Card className="p-6">
+        <h3 className="text-lg font-semibold mb-1">Upload Data</h3>
+        <p className="text-sm text-gray-500 mb-4">Select the type of data you are uploading.</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {DATA_TYPE_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              onClick={() => handleDataTypeChange(opt.value)}
+              className={`text-left p-4 rounded-xl border-2 transition-all ${dataType === opt.value ? opt.activeColor : opt.color
+                }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-2xl">{opt.icon}</span>
+                <span className="font-semibold text-sm">{opt.label}</span>
+                {dataType === opt.value && (
+                  <Badge variant="secondary" className="ml-auto text-xs">Selected</Badge>
+                )}
+              </div>
+              <p className="text-xs text-gray-600">{opt.description}</p>
+            </button>
+          ))}
+        </div>
+      </Card>
+
+
       {/* File Selection */}
       <Card className="p-6">
-        <h3 className="text-lg font-semibold mb-4">Upload Conflict Data</h3>
+        <h3 className="text-lg font-semibold mb-4">
+          Select {activeConfig.label} File
+        </h3>
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium mb-2">
-              Select CSV or Excel file
+              CSV or Excel file
             </label>
             <input
               type="file"
@@ -196,22 +270,20 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
           {selectedFile && (
             <div className="flex items-center space-x-4">
               <span className="text-sm text-gray-600">
-                Selected: {selectedFile.name} ({(selectedFile.size / 1024 / 1024).toFixed(2)} MB)
+                {selectedFile.name} ({(selectedFile.size / 1024 / 1024).toFixed(2)} MB)
               </span>
-              <Button 
-                onClick={analyzeFile} 
+              <Button
+                onClick={analyzeFile}
                 disabled={isAnalyzing || isUploading}
                 variant="outline"
                 size="sm"
               >
                 {isAnalyzing ? (
                   <>
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2" />
                     Analyzing...
                   </>
-                ) : (
-                  'Analyze Structure'
-                )}
+                ) : 'Analyze Structure'}
               </Button>
             </div>
           )}
@@ -239,24 +311,22 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
 
           {analysis.missing_required.length > 0 && (
             <div className="bg-yellow-50 border border-yellow-200 rounded p-4 mb-4">
-              <h4 className="font-medium text-yellow-800 mb-2">Manual Column Mapping Required</h4>
+              <h4 className="font-medium text-yellow-800 mb-1">Manual Column Mapping Required</h4>
               <p className="text-sm text-yellow-700">
-                Some required columns could not be automatically detected. Please map them manually below.
+                Missing: <span className="font-mono">{analysis.missing_required.join(', ')}</span>
               </p>
             </div>
           )}
 
-          {/* Sample Data Preview */}
-          <div className="mb-4">
+          {/* Sample Preview */}
+          <div>
             <h4 className="font-medium mb-2">Sample Data Preview</h4>
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm border border-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
                     {analysis.columns.slice(0, 8).map(col => (
-                      <th key={col} className="px-3 py-2 text-left border-b">
-                        {col}
-                      </th>
+                      <th key={col} className="px-3 py-2 text-left border-b">{col}</th>
                     ))}
                   </tr>
                 </thead>
@@ -264,8 +334,8 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
                   {analysis.sample_data.slice(0, 3).map((row, idx) => (
                     <tr key={idx} className="border-b">
                       {analysis.columns.slice(0, 8).map(col => (
-                        <td key={col} className="px-3 py-2 border-r">
-                          {String(row[col] || '').substring(0, 50)}
+                        <td key={col} className="px-3 py-2 border-r text-xs">
+                          {String(row[col] ?? '').substring(0, 40)}
                         </td>
                       ))}
                     </tr>
@@ -277,20 +347,18 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
         </Card>
       )}
 
-      {/* Column Mapping Interface */}
+      {/* Column Mapping */}
       {showMappingInterface && analysis && (
         <Card className="p-6">
           <h3 className="text-lg font-semibold mb-4">Column Mapping</h3>
           <p className="text-sm text-gray-600 mb-4">
-            Map your file columns to the required CrisisMap format:
+            Map your file&apos;s columns to the required <strong>{activeConfig.label}</strong> format:
           </p>
-
-          <div className="space-y-4">
-            {/* Required Columns */}
+          <div className="space-y-6">
             <div>
               <h4 className="font-medium text-red-600 mb-3">Required Columns</h4>
               <div className="grid gap-4">
-                {requiredColumns.map(col => (
+                {activeConfig.requiredColumns.map(col => (
                   <div key={col.key} className="flex items-center space-x-4">
                     <div className="w-1/3">
                       <label className="block text-sm font-medium">{col.label}</label>
@@ -304,17 +372,13 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
                       >
                         <option value="">Select column...</option>
                         {analysis.columns.map(sourceCol => (
-                          <option key={sourceCol} value={sourceCol}>
-                            {sourceCol}
-                          </option>
+                          <option key={sourceCol} value={sourceCol}>{sourceCol}</option>
                         ))}
                       </select>
                     </div>
-                    <div className="w-1/3 text-sm">
+                    <div className="w-1/3 text-xs">
                       {analysis.detected_mappings[col.key] && (
-                        <span className="text-green-600">
-                          Auto-detected: {analysis.detected_mappings[col.key]}
-                        </span>
+                        <span className="text-green-600">Auto: {analysis.detected_mappings[col.key]}</span>
                       )}
                     </div>
                   </div>
@@ -322,11 +386,10 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
               </div>
             </div>
 
-            {/* Optional Columns */}
             <div>
               <h4 className="font-medium text-blue-600 mb-3">Optional Columns</h4>
               <div className="grid gap-4">
-                {optionalColumns.map(col => (
+                {activeConfig.optionalColumns.map(col => (
                   <div key={col.key} className="flex items-center space-x-4">
                     <div className="w-1/3">
                       <label className="block text-sm font-medium">{col.label}</label>
@@ -338,19 +401,15 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
                         onChange={(e) => updateMapping(col.key, e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
                       >
-                        <option value="">Skip this column</option>
+                        <option value="">Skip column</option>
                         {analysis.columns.map(sourceCol => (
-                          <option key={sourceCol} value={sourceCol}>
-                            {sourceCol}
-                          </option>
+                          <option key={sourceCol} value={sourceCol}>{sourceCol}</option>
                         ))}
                       </select>
                     </div>
-                    <div className="w-1/3 text-sm">
+                    <div className="w-1/3 text-xs">
                       {analysis.detected_mappings[col.key] && (
-                        <span className="text-green-600">
-                          Auto-detected: {analysis.detected_mappings[col.key]}
-                        </span>
+                        <span className="text-green-600">Auto: {analysis.detected_mappings[col.key]}</span>
                       )}
                     </div>
                   </div>
@@ -361,36 +420,33 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
         </Card>
       )}
 
-      {/* Upload Button and Status */}
+      {/* Upload Button + Status */}
       <Card className="p-6">
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <Button
               onClick={uploadFile}
               disabled={!canUpload || isUploading}
-              className="px-6"
+              className="px-8"
             >
               {isUploading ? (
                 <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
                   Processing...
                 </>
               ) : (
-                'Upload and Process'
+                `Upload ${activeConfig.label}`
               )}
             </Button>
 
             {uploadStatus && (
-              <div className="flex items-center space-x-2">
-                <Badge variant={
-                  uploadStatus.status === 'completed' ? 'secondary' :
+              <Badge variant={
+                uploadStatus.status === 'completed' ? 'secondary' :
                   uploadStatus.status === 'error' ? 'destructive' :
-                  uploadStatus.status === 'needs_mapping' ? 'default' :
-                  'outline'
-                }>
-                  {uploadStatus.status}
-                </Badge>
-              </div>
+                    uploadStatus.status === 'needs_mapping' ? 'default' : 'outline'
+              }>
+                {uploadStatus.status}
+              </Badge>
             )}
           </div>
 
@@ -398,21 +454,17 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
             <div className="space-y-3">
               <div className="flex items-center justify-between text-sm">
                 <span className="font-medium">{uploadStatus.message}</span>
-                <span className="text-gray-500">{uploadStatus.progress}%</span>
+                <span className="text-gray-500">{uploadStatus.progress ?? 0}%</span>
               </div>
-              
-              <Progress value={uploadStatus.progress} className="w-full" />
-              
-              {uploadStatus.records_processed && (
+              <Progress value={uploadStatus.progress ?? 0} className="w-full" />
+              {completedRecords != null && completedRecords > 0 && (
                 <p className="text-sm text-green-600">
-                  ✅ Successfully processed {uploadStatus.records_processed.toLocaleString()} records
+                  Successfully processed {completedRecords.toLocaleString()} records
+                  {dataType === 'cast_predictions' && ' — CAST data will be used to improve hotspot predictions'}
                 </p>
               )}
-              
               {uploadStatus.status === 'error' && (
-                <p className="text-sm text-red-600">
-                  ❌ {uploadStatus.message}
-                </p>
+                <p className="text-sm text-red-600">{uploadStatus.message}</p>
               )}
             </div>
           )}

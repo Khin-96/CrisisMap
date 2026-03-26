@@ -8,14 +8,19 @@ import asyncio
 from datetime import datetime, timedelta
 import uuid
 import os
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
 # Import new modules
-from database import DatabaseManager
+from database_sqlite import DatabaseManager
 from ml_pipeline import MLPipeline
 from data_processor import DataProcessor
 from websocket_manager import WebSocketManager
@@ -24,12 +29,23 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database and ML models on startup"""
+    """Initialize database, ML models, and external API tokens on startup"""
     await db_manager.initialize()
     await ml_pipeline.load_models()
+
+    # Always get a fresh ACLED token on startup so it is valid for 24 h
+    from acled_adapter import ACLEDAdapter
+    _acled = ACLEDAdapter()
+    auth_ok = _acled.ensure_authenticated()
+    if auth_ok:
+        print("ACLED OAuth: authenticated successfully")
+    else:
+        print("ACLED OAuth: authentication failed - check ACLED_EMAIL / ACLED_PASSWORD in .env")
+
     print("CrisisMap API v2.0 initialized successfully")
     yield
     # Cleanup code would go here if needed
+
 
 app = FastAPI(
     title="CrisisMap API v2.0",
@@ -309,8 +325,222 @@ async def upload_csv(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# In-memory status store for CAST CSV uploads (separate from ACLED event uploads)
+cast_csv_upload_status: Dict[str, Any] = {}
+
+
+@app.post("/api/upload/cast-csv")
+async def upload_cast_csv(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    custom_mappings: Optional[str] = None,
+):
+    """
+    Upload a CAST-format CSV file.
+    Accepted columns: id, level, country, admin1, outcome, period,
+                      expected_forecast, low_forecast, high_forecast
+    Records are stored in cast_predictions and used to boost ML hotspot scoring.
+    """
+    if not file.filename.endswith((".csv", ".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only CSV and Excel files are supported")
+
+    fetch_id = str(uuid.uuid4())
+
+    upload_dir = Path("uploads")
+    upload_dir.mkdir(exist_ok=True)
+    file_path = upload_dir / f"{fetch_id}_{file.filename}"
+
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    mappings_dict = None
+    if custom_mappings:
+        try:
+            import json
+            mappings_dict = json.loads(custom_mappings)
+        except Exception:
+            pass
+
+    cast_csv_upload_status[fetch_id] = {
+        "fetch_id": fetch_id,
+        "status": "queued",
+        "progress": 0,
+        "records_fetched": 0,
+        "records_stored": 0,
+        "filename": file.filename,
+        "started_at": datetime.utcnow().isoformat(),
+        "message": "Queued for processing",
+    }
+
+    background_tasks.add_task(
+        _process_cast_csv_file,
+        fetch_id,
+        file_path,
+        mappings_dict,
+    )
+
+    return {
+        "fetch_id": fetch_id,
+        "status": "queued",
+        "message": "CAST CSV upload received. Processing in background.",
+    }
+
+
+async def _process_cast_csv_file(
+    fetch_id: str,
+    file_path: Path,
+    custom_mappings: Optional[Dict[str, str]],
+):
+    """Background task: parse CAST CSV and store predictions."""
+    try:
+        import pandas as pd
+
+        cast_csv_upload_status[fetch_id]["status"] = "processing"
+        cast_csv_upload_status[fetch_id]["progress"] = 20
+        cast_csv_upload_status[fetch_id]["message"] = "Reading CAST CSV file..."
+
+        # Read file
+        df = None
+        try:
+            if str(file_path).lower().endswith((".xlsx", ".xls", ".xlsm")):
+                try:
+                    # Try default read_excel first (most common)
+                    df = pd.read_excel(file_path)
+                except Exception as e1:
+                    logger.warning(f"Default Excel read failed, trying sheet detection: {e1}")
+                    try:
+                        # Try with openpyxl explicitly and read_only mode
+                        with pd.ExcelFile(file_path, engine='openpyxl') as xl:
+                            logger.info(f"Detected sheets: {xl.sheet_names}")
+                            if xl.sheet_names:
+                                df = xl.parse(xl.sheet_names[0])
+                            else:
+                                raise ValueError("No sheet names detected even with openpyxl")
+                    except Exception as e2:
+                        logger.warning(f"Openpyxl fallback failed: {e2}")
+                        # Final Excel attempt: Try without specifying engine but different options
+                        try:
+                            df = pd.read_excel(file_path, sheet_name=0)
+                        except Exception as e3:
+                            # Fallback: Maybe it is a CSV with .xlsx extension?
+                            logger.warning(f"All Excel engines failed, trying CSV fallback on {file_path}")
+                            # Try common encodings for CSV
+                            for enc in ['utf-8', 'latin-1', 'cp1252']:
+                                try:
+                                    df = pd.read_csv(file_path, encoding=enc, on_bad_lines='skip')
+                                    logger.info(f"Successfully read file as CSV with encoding {enc}")
+                                    break
+                                except:
+                                    continue
+                            if df is None:
+                                raise ValueError(f"Failed to read file as Excel or CSV. Original error: {e1}")
+            else:
+                df = pd.read_csv(file_path)
+        except Exception as e:
+            cast_csv_upload_status[fetch_id]["status"] = "error"
+            cast_csv_upload_status[fetch_id]["message"] = f"Failed to read file: {str(e)}"
+            raise e
+
+
+        cast_csv_upload_status[fetch_id]["records_fetched"] = len(df)
+        cast_csv_upload_status[fetch_id]["progress"] = 40
+        cast_csv_upload_status[fetch_id]["message"] = f"Read {len(df)} rows. Normalising columns..."
+
+        # Apply custom mappings if provided
+        if custom_mappings:
+            df = df.rename(columns={v: k for k, v in custom_mappings.items()})
+
+        # Normalise expected CAST columns
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        # Enforce types
+        for col in ["expected_forecast", "low_forecast", "high_forecast"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+        if "period" in df.columns:
+            df["period"] = pd.to_datetime(df["period"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+        # Build records list
+        cast_csv_upload_status[fetch_id]["progress"] = 60
+        cast_csv_upload_status[fetch_id]["message"] = "Storing CAST predictions in database..."
+
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "country": row.get("country", ""),
+                "admin1": row.get("admin1", ""),
+                "month": row.get("period", ""),            # period -> month field
+                "year": int(str(row.get("period", ""))[:4]) if row.get("period") else None,
+                "total_forecast": row.get("expected_forecast", 0),
+                "battles_forecast": 0,
+                "erv_forecast": 0,
+                "vac_forecast": 0,
+                "total_observed": 0,
+                "battles_observed": 0,
+                "erv_observed": 0,
+                "vac_observed": 0,
+                "timestamp": None,
+                "upload_id": fetch_id,
+                "data_source": "cast_csv_upload",
+                "processed_at": datetime.utcnow().isoformat(),
+                # Store extra CAST fields in metadata-friendly columns
+                # low / high stored as erv/vac forecast slots for compatibility
+                "erv_forecast": row.get("low_forecast", 0),
+                "vac_forecast": row.get("high_forecast", 0),
+            })
+
+        inserted = await db_manager.insert_cast_predictions(records)
+
+        cast_csv_upload_status[fetch_id]["status"] = "completed"
+        cast_csv_upload_status[fetch_id]["progress"] = 100
+        cast_csv_upload_status[fetch_id]["records_stored"] = inserted
+        cast_csv_upload_status[fetch_id]["completed_at"] = datetime.utcnow().isoformat()
+        cast_csv_upload_status[fetch_id]["message"] = (
+            f"Stored {inserted} CAST predictions. ML hotspot scoring will use this data."
+        )
+
+        await ws_manager.broadcast({
+            "type": "cast_csv_upload_completed",
+            "fetch_id": fetch_id,
+            "records_stored": inserted,
+        })
+
+    except Exception as exc:
+        cast_csv_upload_status[fetch_id]["status"] = "error"
+        cast_csv_upload_status[fetch_id]["message"] = f"Processing failed: {str(exc)}"
+        import traceback
+        traceback.print_exc()
+    finally:
+        if file_path.exists():
+            try:
+                # Give the OS a tiny moment to release handles if needed
+                import gc
+                import os
+                gc.collect()
+                file_path.unlink()
+            except Exception as e:
+                logger.warning(f"Could not delete temp file {file_path}: {e}")
+
+
+
+@app.get("/api/cast/fetch/{fetch_id}")
+async def _cast_csv_status_compat(fetch_id: str):
+    """
+    Unified CAST fetch status — checks both API fetch jobs and CSV upload jobs.
+    """
+    if fetch_id in cast_fetch_status:
+        return cast_fetch_status[fetch_id]
+    if fetch_id in cast_csv_upload_status:
+        return cast_csv_upload_status[fetch_id]
+    raise HTTPException(status_code=404, detail="CAST job not found")
+
+
 @app.post("/api/upload/analyze")
 async def analyze_csv_structure(file: UploadFile = File(...)):
+
     """Analyze CSV structure and suggest column mappings"""
     try:
         # Validate file type
@@ -333,7 +563,13 @@ async def analyze_csv_structure(file: UploadFile = File(...)):
         analysis = await data_processor.analyze_csv_file(str(temp_file_path))
         
         # Clean up temp file
-        temp_file_path.unlink()
+        try:
+            import gc
+            gc.collect()
+            temp_file_path.unlink()
+        except:
+            pass
+
         
         return analysis
         
@@ -1136,3 +1372,641 @@ async def get_location_context(location: str):
         
     except Exception as e:
         return {"error": f"Failed to get location context: {str(e)}"}
+
+
+# ---------------------------------------------------------------------------
+# Flutter Mobile App Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ml/predictions/map")
+async def get_map_predictions(
+    risk_level: Optional[str] = None,
+    country: Optional[str] = None,
+    limit: int = 200
+):
+    """
+    Return geo-tagged ML predictions for Flutter map display.
+    Each result contains latitude, longitude, risk_level, predicted_fatalities.
+    """
+    try:
+        db = DatabaseManager()
+        await db.initialize()
+        results = await db.get_map_predictions(
+            risk_level=risk_level,
+            country=country,
+            limit=limit
+        )
+        await db.close()
+        return {
+            "predictions": results,
+            "total": len(results),
+            "generated_at": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/notifications/alerts")
+async def get_notification_alerts(
+    unread_only: bool = False,
+    limit: int = 50
+):
+    """Return alerts for Flutter push notification feed."""
+    try:
+        db = DatabaseManager()
+        await db.initialize()
+        alerts = await db.get_alerts(unread_only=unread_only, limit=limit)
+        await db.close()
+        return {
+            "alerts": alerts,
+            "total": len(alerts),
+            "unread_count": len([a for a in alerts if not a.get("is_read")]),
+            "fetched_at": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/notifications/mark-read/{alert_id}")
+async def mark_alert_read(alert_id: str):
+    """Mark a notification alert as read."""
+    try:
+        db = DatabaseManager()
+        await db.initialize()
+        success = await db.mark_alert_read(alert_id)
+        await db.close()
+        if success:
+            return {"alert_id": alert_id, "status": "marked_read"}
+        raise HTTPException(status_code=404, detail="Alert not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ai/incident-response")
+async def get_incident_response(request: Dict[str, Any]):
+    """
+    Generate an AI-powered response suggestion for a specific predicted incident.
+    Used by Flutter app when a notification is tapped to show suggested actions.
+    """
+    try:
+        from groq import Groq
+
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            raise HTTPException(status_code=500, detail="Groq API key not configured")
+
+        client = Groq(api_key=groq_api_key)
+
+        location = request.get("location", "Unknown location")
+        country = request.get("country", "")
+        risk_level = request.get("risk_level", "medium")
+        predicted_fatalities = request.get("predicted_fatalities", 0)
+        event_type = request.get("event_type", "conflict event")
+        prediction_date = request.get("prediction_date", "")
+        actor1 = request.get("actor1", "")
+        actor2 = request.get("actor2", "")
+
+        system_prompt = (
+            "You are a senior humanitarian response coordinator specializing in conflict "
+            "zone operations. Your role is to provide immediate, practical, and actionable "
+            "response recommendations when a conflict event is predicted. "
+            "Keep responses concise, structured, and field-ready. "
+            "Do not use emojis. Use plain text with clear section headers separated by newlines."
+        )
+
+        user_prompt = f"""
+PREDICTED INCIDENT REPORT:
+Location: {location}, {country}
+Risk Level: {risk_level.upper()}
+Predicted Fatalities: {predicted_fatalities:.0f}
+Event Type: {event_type}
+Predicted Date: {prediction_date[:10] if prediction_date else 'Within 14 days'}
+Involved Actor 1: {actor1 if actor1 else 'Unknown'}
+Involved Actor 2: {actor2 if actor2 else 'Unknown'}
+
+Based on this prediction, provide a structured response plan covering:
+
+IMMEDIATE RESPONSE (first 24 hours)
+List 3-4 immediate actions for field teams.
+
+RESOURCE DEPLOYMENT
+What resources and personnel to pre-position.
+
+COMMUNICATION PROTOCOL
+Who to notify and through what channels.
+
+MONITORING TRIGGERS
+Key indicators that confirm or disprove this prediction.
+
+HUMANITARIAN CONSIDERATIONS
+Civilian protection measures to activate.
+
+Keep each section brief and operational.
+"""
+
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            model="llama-3.1-8b-instant",
+            temperature=0.15,
+            max_tokens=900
+        )
+
+        ai_response = chat_completion.choices[0].message.content
+
+        # Optionally update the alert with the AI response
+        alert_id = request.get("alert_id")
+        if alert_id:
+            try:
+                db = DatabaseManager()
+                await db.initialize()
+                async with aiosqlite.connect(db.db_path) as conn:
+                    await conn.execute(
+                        "UPDATE alerts SET ai_response = ? WHERE alert_id = ?",
+                        (ai_response, alert_id)
+                    )
+                    await conn.commit()
+                await db.close()
+            except Exception:
+                pass
+
+        return {
+            "location": location,
+            "country": country,
+            "risk_level": risk_level,
+            "predicted_fatalities": predicted_fatalities,
+            "response_plan": ai_response,
+            "model": "llama-3.1-8b-instant",
+            "generated_at": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        print(f"Incident response error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+
+
+@app.get("/api/dashboard/summary")
+async def get_dashboard_summary():
+    """
+    Aggregated summary for the Flutter dashboard home screen.
+    Returns total events, fatalities, alert counts, and trend direction.
+    """
+    try:
+        db = DatabaseManager()
+        await db.initialize()
+
+        all_events = await db.get_events({}, limit=100000)
+        alerts = await db.get_alerts(unread_only=False, limit=1000)
+        map_preds = await db.get_map_predictions(limit=1000)
+
+        total_events = len(all_events)
+        total_fatalities = sum(e.get("fatalities", 0) or 0 for e in all_events)
+        high_risk_count = len([p for p in map_preds if p.get("risk_level") == "high"])
+        medium_risk_count = len([p for p in map_preds if p.get("risk_level") == "medium"])
+        unread_alerts = len([a for a in alerts if not a.get("is_read")])
+
+        # Simple trend: compare last 30 days vs previous 30 days
+        now = datetime.utcnow()
+        cutoff_recent = (now - timedelta(days=30)).isoformat()
+        cutoff_older = (now - timedelta(days=60)).isoformat()
+        recent_events = [
+            e for e in all_events
+            if e.get("event_date", "") >= cutoff_recent
+        ]
+        older_events = [
+            e for e in all_events
+            if cutoff_older <= e.get("event_date", "") < cutoff_recent
+        ]
+        trend = "stable"
+        if len(recent_events) > len(older_events) * 1.15:
+            trend = "increasing"
+        elif len(recent_events) < len(older_events) * 0.85:
+            trend = "decreasing"
+
+        await db.close()
+
+        return {
+            "total_events": total_events,
+            "total_fatalities": total_fatalities,
+            "high_risk_predictions": high_risk_count,
+            "medium_risk_predictions": medium_risk_count,
+            "unread_alerts": unread_alerts,
+            "trend_direction": trend,
+            "recent_events_30d": len(recent_events),
+            "summary_generated_at": now.isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+import aiosqlite  # ensure aiosqlite is available for inline use above
+
+# ------------------------------------------------------------------ #
+# ACLED API Integration Endpoints
+# ------------------------------------------------------------------ #
+
+# In-memory store for ongoing ACLED fetch jobs
+acled_fetch_status: Dict[str, Any] = {}
+
+
+class ACLEDFetchRequest(BaseModel):
+    country: Optional[str] = None
+    countries: Optional[List[str]] = None         # multiple countries at once
+    start_date: Optional[str] = None              # YYYY-MM-DD
+    end_date: Optional[str] = None                # YYYY-MM-DD
+    event_type: Optional[str] = None
+    max_records: int = 5000
+    year: Optional[int] = None
+
+
+@app.post("/api/acled/fetch")
+async def fetch_acled_data(
+    request: ACLEDFetchRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Trigger a background fetch from the ACLED API and store results in the DB.
+    Supports filtering by country, date range, event type, and year.
+    """
+    fetch_id = str(uuid.uuid4())
+
+    # Build ACLED query filters
+    acled_filters: Dict[str, Any] = {}
+
+    if request.country:
+        acled_filters["country"] = request.country
+    elif request.countries:
+        # ACLED supports OR syntax: country=X:OR:country=Y
+        acled_filters["country"] = ":OR:country=".join(request.countries)
+
+    if request.year:
+        acled_filters["year"] = request.year
+
+    if request.start_date and request.end_date:
+        acled_filters["event_date"] = f"{request.start_date}|{request.end_date}"
+        acled_filters["event_date_where"] = "BETWEEN"
+    elif request.start_date:
+        acled_filters["event_date"] = request.start_date
+        acled_filters["event_date_where"] = ">="
+    elif request.end_date:
+        acled_filters["event_date"] = request.end_date
+        acled_filters["event_date_where"] = "<="
+
+    if request.event_type:
+        acled_filters["event_type"] = request.event_type
+
+    # Initialise status entry
+    acled_fetch_status[fetch_id] = {
+        "fetch_id": fetch_id,
+        "status": "queued",
+        "progress": 0,
+        "records_fetched": 0,
+        "records_stored": 0,
+        "filters": acled_filters,
+        "max_records": request.max_records,
+        "started_at": datetime.utcnow().isoformat(),
+        "message": "Queued for processing"
+    }
+
+    background_tasks.add_task(
+        _run_acled_fetch,
+        fetch_id,
+        acled_filters,
+        request.max_records
+    )
+
+    return {
+        "fetch_id": fetch_id,
+        "status": "queued",
+        "message": "ACLED data fetch started in the background.",
+        "filters_applied": acled_filters
+    }
+
+
+async def _run_acled_fetch(
+    fetch_id: str,
+    filters: Dict[str, Any],
+    max_records: int
+):
+    """Background task: fetch from ACLED and insert into the DB."""
+    try:
+        acled_fetch_status[fetch_id]["status"] = "fetching"
+        acled_fetch_status[fetch_id]["progress"] = 10
+        acled_fetch_status[fetch_id]["message"] = "Connecting to ACLED API..."
+
+        records = data_processor.acled_adapter.fetch_paginated_data(
+            filters=filters,
+            max_records=max_records
+        )
+
+        acled_fetch_status[fetch_id]["records_fetched"] = len(records)
+        acled_fetch_status[fetch_id]["progress"] = 50
+        acled_fetch_status[fetch_id]["message"] = f"Fetched {len(records)} records, storing in database..."
+
+        if not records:
+            acled_fetch_status[fetch_id]["status"] = "completed"
+            acled_fetch_status[fetch_id]["progress"] = 100
+            acled_fetch_status[fetch_id]["message"] = "Completed with 0 records (check filters or token)"
+            return
+
+        # Standardise and persist
+        df = data_processor.acled_adapter.standardize_data(records)
+
+        import uuid as _uuid
+        fetch_label = f"acled_{_uuid.uuid4().hex[:8]}"
+        df["upload_id"] = fetch_label
+        df["data_source"] = "acled_api"
+        df["processed_at"] = datetime.utcnow().isoformat()
+
+        events = df.to_dict("records")
+        inserted = await db_manager.insert_events(events)
+
+        acled_fetch_status[fetch_id]["status"] = "completed"
+        acled_fetch_status[fetch_id]["progress"] = 100
+        acled_fetch_status[fetch_id]["records_stored"] = inserted
+        acled_fetch_status[fetch_id]["completed_at"] = datetime.utcnow().isoformat()
+        acled_fetch_status[fetch_id]["message"] = f"Successfully stored {inserted} events from ACLED"
+
+        # Notify connected WebSocket clients
+        await ws_manager.broadcast({
+            "type": "acled_fetch_completed",
+            "fetch_id": fetch_id,
+            "records_stored": inserted
+        })
+
+    except Exception as exc:
+        acled_fetch_status[fetch_id]["status"] = "error"
+        acled_fetch_status[fetch_id]["message"] = f"Fetch failed: {str(exc)}"
+        import traceback
+        traceback.print_exc()
+
+
+@app.get("/api/acled/fetch/{fetch_id}")
+async def get_acled_fetch_status(fetch_id: str):
+    """Poll the status of an ACLED fetch job."""
+    if fetch_id not in acled_fetch_status:
+        raise HTTPException(status_code=404, detail="Fetch job not found")
+    return acled_fetch_status[fetch_id]
+
+
+@app.get("/api/acled/fetch")
+async def list_acled_fetches():
+    """List all ACLED fetch jobs (most recent first)."""
+    jobs = sorted(
+        acled_fetch_status.values(),
+        key=lambda j: j.get("started_at", ""),
+        reverse=True
+    )
+    return {"jobs": jobs, "total": len(jobs)}
+
+
+@app.get("/api/acled/token-status")
+async def acled_token_status():
+    """
+    Check whether ACLED credentials are present and optionally verify
+    the token by making a minimal test request to the API.
+    """
+    from acled_adapter import ACLEDAdapter
+    adapter = ACLEDAdapter()
+
+    has_token = bool(adapter.access_token)
+    has_refresh = bool(adapter.refresh_token)
+    email = adapter.email or "not configured"
+
+    # Quick verification request (limit=1)
+    verified = False
+    error_msg = None
+    if has_token:
+        test_records = adapter.fetch_data({"limit": 1})
+        verified = isinstance(test_records, list)
+        if not verified:
+            error_msg = "Token present but test request returned no data"
+
+    return {
+        "email": email,
+        "has_access_token": has_token,
+        "has_refresh_token": has_refresh,
+        "token_verified": verified,
+        "error": error_msg
+    }
+
+
+@app.post("/api/acled/refresh-token")
+async def refresh_acled_token():
+    """Manually trigger an ACLED OAuth token refresh."""
+    from acled_adapter import ACLEDAdapter
+    adapter = ACLEDAdapter()
+    success = adapter.refresh_access_token()
+    if success:
+        return {
+            "status": "refreshed",
+            "message": "ACLED access token refreshed and persisted to .env"
+        }
+    raise HTTPException(
+        status_code=502,
+        detail="Failed to refresh ACLED token. Attempted password re-auth as fallback."
+    )
+
+
+@app.post("/api/acled/authenticate")
+async def acled_authenticate():
+    """
+    Force a full password-based re-authentication with ACLED.
+    Uses ACLED_EMAIL and ACLED_PASSWORD from .env.
+    Call this whenever tokens are stale or lost.
+    """
+    from acled_adapter import ACLEDAdapter
+    adapter = ACLEDAdapter()
+    success = adapter.authenticate()
+    if success:
+        return {
+            "status": "authenticated",
+            "message": "Fresh ACLED tokens obtained and persisted to .env"
+        }
+    raise HTTPException(
+        status_code=502,
+        detail="ACLED authentication failed. Check ACLED_EMAIL / ACLED_PASSWORD in .env."
+    )
+
+
+# ------------------------------------------------------------------ #
+# CAST (Conflict Alert System) Prediction Endpoints
+# ------------------------------------------------------------------ #
+
+cast_fetch_status: Dict[str, Any] = {}
+
+
+class CASTFetchRequest(BaseModel):
+    country: Optional[str] = None
+    countries: Optional[List[str]] = None
+    admin1: Optional[str] = None
+    month: Optional[str] = None          # e.g. "March"
+    year: Optional[int] = None
+    max_records: int = 5000
+
+
+@app.post("/api/cast/fetch")
+async def fetch_cast_data(
+    request: CASTFetchRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Trigger a background fetch from the ACLED CAST prediction endpoint.
+    Returns forecasted political violence counts by country and admin1.
+    """
+    fetch_id = str(uuid.uuid4())
+
+    # Build CAST query filters
+    cast_filters: Dict[str, Any] = {}
+
+    if request.country:
+        cast_filters["country"] = request.country
+    elif request.countries:
+        cast_filters["country"] = "|".join(request.countries)
+
+    if request.admin1:
+        cast_filters["admin1"] = request.admin1
+    if request.month:
+        cast_filters["month"] = request.month
+    if request.year:
+        cast_filters["year"] = request.year
+
+    cast_fetch_status[fetch_id] = {
+        "fetch_id": fetch_id,
+        "status": "queued",
+        "progress": 0,
+        "records_fetched": 0,
+        "records_stored": 0,
+        "filters": cast_filters,
+        "max_records": request.max_records,
+        "started_at": datetime.utcnow().isoformat(),
+        "message": "Queued for processing"
+    }
+
+    background_tasks.add_task(
+        _run_cast_fetch,
+        fetch_id,
+        cast_filters,
+        request.max_records
+    )
+
+    return {
+        "fetch_id": fetch_id,
+        "status": "queued",
+        "message": "CAST data fetch started in the background.",
+        "filters_applied": cast_filters
+    }
+
+
+async def _run_cast_fetch(
+    fetch_id: str,
+    filters: Dict[str, Any],
+    max_records: int
+):
+    """Background task: fetch from CAST and store in DB."""
+    try:
+        cast_fetch_status[fetch_id]["status"] = "fetching"
+        cast_fetch_status[fetch_id]["progress"] = 10
+        cast_fetch_status[fetch_id]["message"] = "Connecting to ACLED CAST API..."
+
+        records = data_processor.acled_adapter.fetch_cast_paginated(
+            filters=filters,
+            max_records=max_records
+        )
+        cast_fetch_status[fetch_id]["records_fetched"] = len(records)
+        cast_fetch_status[fetch_id]["progress"] = 50
+        cast_fetch_status[fetch_id]["message"] = (
+            f"Fetched {len(records)} CAST records, storing in database..."
+        )
+
+        if not records:
+            cast_fetch_status[fetch_id]["status"] = "completed"
+            cast_fetch_status[fetch_id]["progress"] = 100
+            cast_fetch_status[fetch_id]["message"] = "Completed with 0 records (check filters or token)"
+            return
+
+        df = data_processor.acled_adapter.standardize_cast_data(records)
+
+        import uuid as _uuid
+        fetch_label = f"cast_{_uuid.uuid4().hex[:8]}"
+        df["upload_id"] = fetch_label
+        df["data_source"] = "acled_cast"
+        df["processed_at"] = datetime.utcnow().isoformat()
+
+        # Store CAST predictions as their own collection / table
+        events = df.to_dict("records")
+        inserted = await db_manager.insert_cast_predictions(events)
+
+        cast_fetch_status[fetch_id]["status"] = "completed"
+        cast_fetch_status[fetch_id]["progress"] = 100
+        cast_fetch_status[fetch_id]["records_stored"] = inserted
+        cast_fetch_status[fetch_id]["completed_at"] = datetime.utcnow().isoformat()
+        cast_fetch_status[fetch_id]["message"] = (
+            f"Successfully stored {inserted} CAST predictions"
+        )
+
+        await ws_manager.broadcast({
+            "type": "cast_fetch_completed",
+            "fetch_id": fetch_id,
+            "records_stored": inserted
+        })
+
+    except Exception as exc:
+        cast_fetch_status[fetch_id]["status"] = "error"
+        cast_fetch_status[fetch_id]["message"] = f"CAST fetch failed: {str(exc)}"
+        import traceback
+        traceback.print_exc()
+
+
+@app.get("/api/cast/fetch/{fetch_id}")
+async def get_cast_fetch_status(fetch_id: str):
+    """Poll the status of a CAST fetch job."""
+    if fetch_id not in cast_fetch_status:
+        raise HTTPException(status_code=404, detail="CAST fetch job not found")
+    return cast_fetch_status[fetch_id]
+
+
+@app.get("/api/cast/fetch")
+async def list_cast_fetches():
+    """List all CAST fetch jobs (most recent first)."""
+    jobs = sorted(
+        cast_fetch_status.values(),
+        key=lambda j: j.get("started_at", ""),
+        reverse=True
+    )
+    return {"jobs": jobs, "total": len(jobs)}
+
+
+@app.get("/api/cast/predictions")
+async def get_cast_predictions(
+    country: Optional[str] = None,
+    admin1: Optional[str] = None,
+    year: Optional[int] = None,
+    month: Optional[str] = None,
+    limit: int = 500
+):
+    """
+    Query stored CAST predictions from the local database.
+    Supports filtering by country, admin1, year, and month.
+    """
+    try:
+        filters: Dict[str, Any] = {}
+        if country:
+            filters["country"] = country
+        if admin1:
+            filters["admin1"] = admin1
+        if year:
+            filters["year"] = year
+        if month:
+            filters["month"] = month
+
+        predictions = await db_manager.get_cast_predictions(filters, limit)
+        return {
+            "count": len(predictions),
+            "filters": filters,
+            "predictions": predictions
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
