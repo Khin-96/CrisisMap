@@ -57,6 +57,16 @@ class DataProcessor:
             # Insert into database
             inserted_count = await db.insert_events(events)
             
+            # MongoDB dual-write
+            try:
+                from database import DatabaseManager as MongoManager
+                mongo_db = MongoManager()
+                await mongo_db.initialize()
+                await mongo_db.insert_events(events)
+                logger.info("Successfully replicated to MongoDB Atlas")
+            except Exception as e:
+                logger.error(f"Failed to dual-write to MongoDB Atlas: {e}")
+            
             logger.info(f"Processed and stored {inserted_count} events from upload {upload_id}")
             return inserted_count
             
@@ -98,6 +108,16 @@ class DataProcessor:
             
             # Insert into database
             inserted_count = await db.insert_events(events)
+            
+            # MongoDB dual-write
+            try:
+                from database import DatabaseManager as MongoManager
+                mongo_db = MongoManager()
+                await mongo_db.initialize()
+                await mongo_db.insert_events(events)
+                logger.info("Successfully replicated API data to MongoDB Atlas")
+            except Exception as e:
+                logger.error(f"Failed to dual-write API data to MongoDB Atlas: {e}")
             
             logger.info(f"Successfully processed and stored {inserted_count} ACLED records")
             return inserted_count

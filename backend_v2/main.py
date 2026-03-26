@@ -493,6 +493,16 @@ async def _process_cast_csv_file(
             })
 
         inserted = await db_manager.insert_cast_predictions(records)
+        
+        # MongoDB dual-write
+        try:
+            from database import DatabaseManager as MongoManager
+            mongo_db = MongoManager()
+            await mongo_db.initialize()
+            await mongo_db.insert_cast_predictions(records)
+            logger.info("Successfully replicated CAST predictions to MongoDB Atlas")
+        except Exception as e:
+            logger.error(f"Failed to dual-write CAST predictions to MongoDB Atlas: {e}")
 
         cast_csv_upload_status[fetch_id]["status"] = "completed"
         cast_csv_upload_status[fetch_id]["progress"] = 100

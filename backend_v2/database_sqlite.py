@@ -25,7 +25,7 @@ class DatabaseManager:
 
     async def _create_tables(self):
         """Create database tables"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,7 +167,7 @@ class DatabaseManager:
     async def insert_events(self, events: List[Dict[str, Any]]) -> int:
         """Insert multiple conflict events"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 current_time = datetime.utcnow().isoformat()
                 for event in events:
                     if 'event_id' not in event:
@@ -209,7 +209,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Retrieve events with filtering and pagination"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 db.row_factory = aiosqlite.Row
                 query = "SELECT * FROM events"
                 params = []
@@ -246,7 +246,7 @@ class DatabaseManager:
     async def store_model(self, model_data: Dict[str, Any]) -> str:
         """Store ML model metadata"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 current_time = datetime.utcnow().isoformat()
                 model_id = model_data.get('model_id', str(uuid.uuid4()))
                 await db.execute('''
@@ -272,7 +272,7 @@ class DatabaseManager:
     async def get_model(self, model_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve model by ID"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 db.row_factory = aiosqlite.Row
                 cursor = await db.execute("SELECT * FROM models WHERE model_id = ?", (model_id,))
                 row = await cursor.fetchone()
@@ -290,7 +290,7 @@ class DatabaseManager:
     async def store_predictions(self, predictions: List[Dict[str, Any]]) -> int:
         """Store model predictions"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 current_time = datetime.utcnow().isoformat()
                 for prediction in predictions:
                     await db.execute('''
@@ -317,7 +317,7 @@ class DatabaseManager:
     async def store_map_predictions(self, map_predictions: List[Dict[str, Any]]) -> int:
         """Store geo-tagged predictions for Flutter map display"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 current_time = datetime.utcnow().isoformat()
                 stored = 0
                 for pred in map_predictions:
@@ -363,7 +363,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get geo-tagged predictions for Flutter map display"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 db.row_factory = aiosqlite.Row
                 query = "SELECT * FROM map_predictions"
                 params = []
@@ -388,7 +388,7 @@ class DatabaseManager:
     async def store_alert(self, alert: Dict[str, Any]) -> str:
         """Store a push notification alert"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 current_time = datetime.utcnow().isoformat()
                 alert_id = alert.get('alert_id', str(uuid.uuid4()))
                 await db.execute('''
@@ -426,7 +426,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get alerts for Flutter notification feed"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 db.row_factory = aiosqlite.Row
                 query = "SELECT * FROM alerts"
                 params = []
@@ -444,7 +444,7 @@ class DatabaseManager:
     async def mark_alert_read(self, alert_id: str) -> bool:
         """Mark a notification alert as read"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 await db.execute("UPDATE alerts SET is_read = 1 WHERE alert_id = ?", (alert_id,))
                 await db.commit()
                 return True
@@ -459,7 +459,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get latest predictions from a model"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 db.row_factory = aiosqlite.Row
                 query = "SELECT * FROM predictions WHERE model_id = ?"
                 params = [model_id]
@@ -487,7 +487,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get temporal trends using SQL aggregation"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 db.row_factory = aiosqlite.Row
                 if period == "daily":
                     date_format = "%Y-%m-%d"
@@ -528,7 +528,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Identify geographic hotspots"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 db.row_factory = aiosqlite.Row
                 query = '''
                     SELECT
@@ -572,7 +572,7 @@ class DatabaseManager:
     async def insert_cast_predictions(self, records: List[Dict[str, Any]]) -> int:
         """Insert CAST forecast records into cast_predictions table."""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 current_time = datetime.utcnow().isoformat()
                 
                 # Prepare data for batch insert
@@ -622,7 +622,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Retrieve stored CAST predictions with optional filters."""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
                 db.row_factory = aiosqlite.Row
                 query = "SELECT * FROM cast_predictions"
                 params = []

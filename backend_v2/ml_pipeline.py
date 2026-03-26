@@ -341,11 +341,11 @@ class MLPipeline:
                 loc_fatalities_total=('fatalities', 'sum'),
                 loc_events_total=('fatalities', 'count'),
                 fatalities_avg=('fatalities', 'mean'),
-                location_name=('location', lambda x: x.mode()[0] if len(x) > 0 else ''),
-                country_val=('country', lambda x: x.mode()[0] if len(x) > 0 else ''),
-                actor1_val=('actor1', lambda x: x.mode()[0] if len(x) > 0 else ''),
-                actor2_val=('actor2', lambda x: x.mode()[0] if len(x) > 0 else ''),
-                event_type_val=('event_type', lambda x: x.mode()[0] if len(x) > 0 else ''),
+                location_name=('location', lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else ''),
+                country_val=('country', lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else ''),
+                actor1_val=('actor1', lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else ''),
+                actor2_val=('actor2', lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else ''),
+                event_type_val=('event_type', lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else ''),
             ).reset_index()
 
             # Only use locations with meaningful history (at least 3 events)

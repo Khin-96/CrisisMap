@@ -86,6 +86,25 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to insert events: {e}")
             raise
+            
+    async def insert_cast_predictions(self, records: List[Dict[str, Any]]) -> int:
+        """Insert CAST forecast records into MongoDB."""
+        try:
+            for rec in records:
+                rec["created_at"] = datetime.utcnow()
+                rec["updated_at"] = datetime.utcnow()
+                if "cast_id" not in rec:
+                    import uuid
+                    rec["cast_id"] = str(uuid.uuid4())
+                    
+            if not records:
+                return 0
+                
+            result = await self.db.cast_predictions.insert_many(records)
+            return len(result.inserted_ids)
+        except Exception as e:
+            logger.error(f"Failed to insert CAST predictions: {e}")
+            raise
     
     async def get_events(
         self, 
