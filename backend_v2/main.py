@@ -46,6 +46,10 @@ async def lifespan(app: FastAPI):
     _acled = ACLEDAdapter()
     auth_ok = _acled.ensure_authenticated()
     if auth_ok:
+        # Propagate fresh token to the shared adapter used by all fetch jobs
+        import os
+        data_processor.acled_adapter.access_token = os.getenv("ACLED_ACCESS_TOKEN")
+        data_processor.acled_adapter.refresh_token = os.getenv("ACLED_REFRESH_TOKEN")
         print("ACLED OAuth: authenticated successfully")
     else:
         print("ACLED OAuth: authentication failed - check ACLED_EMAIL / ACLED_PASSWORD in .env")

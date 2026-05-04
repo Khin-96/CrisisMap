@@ -9,8 +9,9 @@ import { AppSidebar } from '@/components/app-sidebar'
 import { MetricCard } from '@/components/metric-card'
 import { TrendChart } from '@/components/trend-chart'
 import { AlertFeed } from '@/components/alert-feed'
-import RealMap from '@/components/real-map'
+import ChoroplethMap from '@/components/choropleth-map'
 import CSVUpload from '@/components/csv-upload'
+import ACLEDFetchPanel from '@/components/acled-fetch-panel'
 import EventsTable from '@/components/events-table'
 import AnalyticsDashboard from '@/components/analytics-dashboard'
 import AIAssistant from '@/components/ai-assistant'
@@ -337,7 +338,19 @@ export default function Dashboard() {
             ) : (
               <>
                 {activeTab === 'upload' && (
-                  <CSVUpload onUploadComplete={handleUploadComplete} />
+                  <div className="space-y-6">
+                    <div className="flex gap-3 pb-2 border-b">
+                      <h2 className="text-base font-semibold">Data Sources</h2>
+                    </div>
+                    <ACLEDFetchPanel onFetchComplete={handleUploadComplete} />
+                    <div className="relative">
+                      <div className="absolute inset-0 flex items-center"><div className="w-full border-t" /></div>
+                      <div className="relative flex justify-center text-xs uppercase">
+                        <span className="bg-background px-2 text-muted-foreground">or upload manually</span>
+                      </div>
+                    </div>
+                    <CSVUpload onUploadComplete={handleUploadComplete} />
+                  </div>
                 )}
 
                 {activeTab === 'events' && (
@@ -548,13 +561,10 @@ export default function Dashboard() {
                             <p className="text-sm text-gray-600">Interactive map showing conflict events and hotspots</p>
                           </div>
                           <div className="p-0">
-                            <RealMap
+                            <ChoroplethMap
                               events={events}
                               height="600px"
-                              showHeatmap={showHeatmap}
-                              filterByDateRange={dateRange}
-                              filterByType={selectedEventType ? [selectedEventType] : undefined}
-                              onEventClick={handleEventSelect}
+                              onCountryClick={(c) => setSelectedCountry(c === selectedCountry ? '' : c)}
                             />
                           </div>
                         </Card>

@@ -123,8 +123,13 @@ class ACLEDAdapter:
         """
         Called at startup. Always does a fresh password-based auth so the
         token is guaranteed to be valid for the next 24 hours.
+        Ignores any cached ACLED_ACCESS_TOKEN in .env.
         """
-        return self.authenticate()
+        ok = self.authenticate()
+        if ok:
+            # Also reload into instance so _get() uses the brand new token
+            self.access_token = os.getenv("ACLED_ACCESS_TOKEN")
+        return ok
 
     # ------------------------------------------------------------------ #
     # Internal request helper
