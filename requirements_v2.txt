@@ -26,6 +26,7 @@ websockets>=12.0
 # File Processing
 openpyxl>=3.1.2
 xlrd>=2.0.1
+python-calamine>=0.6.2
 chardet>=5.2.0
 
 # Monitoring and Logging

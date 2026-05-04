@@ -1,3 +1,5 @@
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
 import joblib
 import numpy as np
 import pandas as pd
@@ -180,7 +182,7 @@ class MLPipeline:
                     min_samples_leaf=hyperparameters.get('min_samples_leaf', 1),
                     max_features=hyperparameters.get('max_features', 'sqrt'),
                     random_state=42,
-                    n_jobs=-1
+                    n_jobs=1
                 )
             elif model_type == "gradient_boosting":
                 model = GradientBoostingRegressor(

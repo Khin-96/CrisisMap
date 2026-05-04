@@ -565,6 +565,53 @@ class DatabaseManager:
             logger.error(f"Failed to get hotspots: {e}")
             raise
 
+    async def get_comprehensive_stats(self) -> Dict[str, Any]:
+        """Get comprehensive statistics for AI context using SQL aggregations"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # 1. Date Range
+                cursor = await db.execute("SELECT MIN(event_date), MAX(event_date) FROM events")
+                min_date, max_date = await cursor.fetchone()
+                date_range = f"{min_date} to {max_date}" if min_date and max_date else "Unknown"
+                
+                # 2. Total active countries count
+                cursor = await db.execute("SELECT COUNT(DISTINCT country) FROM events")
+                active_countries_count = (await cursor.fetchone())[0]
+                
+                # 3. Top Countries
+                cursor = await db.execute('''
+                    SELECT country, COUNT(*) as events, SUM(fatalities) as fatalities
+                    FROM events
+                    GROUP BY country
+                    ORDER BY fatalities DESC
+                    LIMIT 10
+                ''')
+                top_countries_rows = await cursor.fetchall()
+                top_countries = [(row['country'], {"events": row['events'], "fatalities": row['fatalities']}) for row in top_countries_rows]
+                
+                # 4. Top Event Types
+                cursor = await db.execute('''
+                    SELECT event_type, COUNT(*) as events, SUM(fatalities) as fatalities
+                    FROM events
+                    GROUP BY event_type
+                    ORDER BY events DESC
+                    LIMIT 10
+                ''')
+                top_event_types_rows = await cursor.fetchall()
+                top_event_types = [(row['event_type'], {"events": row['events'], "fatalities": row['fatalities']}) for row in top_event_types_rows]
+                
+                return {
+                    "date_range": date_range,
+                    "active_countries_count": active_countries_count,
+                    "top_countries": top_countries,
+                    "top_event_types": top_event_types
+                }
+        except Exception as e:
+            logger.error(f"Failed to get comprehensive stats: {e}")
+            raise
+
     async def get_events_aggregated(self, pipeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Compatibility method for MongoDB-style aggregation"""
         return []
@@ -640,6 +687,64 @@ class DatabaseManager:
                 return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"Failed to retrieve CAST predictions: {e}")
+            raise
+
+    async def store_ai_interaction(self, interaction: Dict[str, Any]) -> str:
+        """Store an AI interaction for analytics and learning"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
+                current_time = datetime.utcnow().isoformat()
+                interaction_id = str(uuid.uuid4())
+                
+                # Create table if not exists (it was missing from _create_tables)
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS ai_interactions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        interaction_id TEXT UNIQUE NOT NULL,
+                        query TEXT,
+                        response TEXT,
+                        model_used TEXT,
+                        context_summary TEXT,
+                        timestamp TEXT NOT NULL
+                    )
+                ''')
+                
+                await db.execute('''
+                    INSERT INTO ai_interactions
+                    (interaction_id, query, response, model_used, context_summary, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    interaction_id,
+                    interaction.get('query'),
+                    interaction.get('response'),
+                    interaction.get('model_used', 'llama-3.1-8b-instant'),
+                    json.dumps(interaction.get('context_summary', {})),
+                    interaction.get('timestamp', current_time)
+                ))
+                await db.commit()
+                return interaction_id
+        except Exception as e:
+            logger.error(f"Failed to store AI interaction: {e}")
+            raise
+
+    async def get_ai_interactions(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Retrieve recent AI interactions"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM ai_interactions ORDER BY timestamp DESC LIMIT ?", 
+                    (limit,)
+                )
+                rows = await cursor.fetchall()
+                interactions = []
+                for row in rows:
+                    interaction = dict(row)
+                    interaction["context_summary"] = json.loads(interaction["context_summary"]) if interaction["context_summary"] else {}
+                    interactions.append(interaction)
+                return interactions
+        except Exception as e:
+            logger.error(f"Failed to retrieve AI interactions: {e}")
             raise
 
     async def close(self):

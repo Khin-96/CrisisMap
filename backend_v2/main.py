@@ -1,3 +1,8 @@
+import warnings
+warnings.filterwarnings('ignore')
+import warnings as warnings_lib
+warnings_lib.simplefilter("ignore")
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -11,6 +16,9 @@ import os
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Define base directory
+BASE_DIR = Path(__file__).resolve().parent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +49,10 @@ async def lifespan(app: FastAPI):
         print("ACLED OAuth: authenticated successfully")
     else:
         print("ACLED OAuth: authentication failed - check ACLED_EMAIL / ACLED_PASSWORD in .env")
+
+    # Auto-sync: pull recent data from ACLED API if DB is sparse
+    import asyncio
+    asyncio.ensure_future(_startup_acled_sync())
 
     print("CrisisMap API v2.0 initialized successfully")
     yield
@@ -274,15 +286,8 @@ async def upload_csv(
     try:
         upload_id = str(uuid.uuid4())
         
-        # Validate file type
-        if not file.filename.endswith(('.csv', '.xlsx', '.xls')):
-            raise HTTPException(
-                status_code=400,
-                detail="Only CSV and Excel files are supported"
-            )
-        
         # Save uploaded file
-        upload_dir = Path("uploads")
+        upload_dir = BASE_DIR / "uploads"
         upload_dir.mkdir(exist_ok=True)
         file_path = upload_dir / f"{upload_id}_{file.filename}"
         
@@ -342,12 +347,9 @@ async def upload_cast_csv(
                       expected_forecast, low_forecast, high_forecast
     Records are stored in cast_predictions and used to boost ML hotspot scoring.
     """
-    if not file.filename.endswith((".csv", ".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="Only CSV and Excel files are supported")
-
     fetch_id = str(uuid.uuid4())
 
-    upload_dir = Path("uploads")
+    upload_dir = BASE_DIR / "uploads"
     upload_dir.mkdir(exist_ok=True)
     file_path = upload_dir / f"{fetch_id}_{file.filename}"
 
@@ -401,47 +403,10 @@ async def _process_cast_csv_file(
         cast_csv_upload_status[fetch_id]["progress"] = 20
         cast_csv_upload_status[fetch_id]["message"] = "Reading CAST CSV file..."
 
-        # Read file
-        df = None
-        try:
-            if str(file_path).lower().endswith((".xlsx", ".xls", ".xlsm")):
-                try:
-                    # Try default read_excel first (most common)
-                    df = pd.read_excel(file_path)
-                except Exception as e1:
-                    logger.warning(f"Default Excel read failed, trying sheet detection: {e1}")
-                    try:
-                        # Try with openpyxl explicitly and read_only mode
-                        with pd.ExcelFile(file_path, engine='openpyxl') as xl:
-                            logger.info(f"Detected sheets: {xl.sheet_names}")
-                            if xl.sheet_names:
-                                df = xl.parse(xl.sheet_names[0])
-                            else:
-                                raise ValueError("No sheet names detected even with openpyxl")
-                    except Exception as e2:
-                        logger.warning(f"Openpyxl fallback failed: {e2}")
-                        # Final Excel attempt: Try without specifying engine but different options
-                        try:
-                            df = pd.read_excel(file_path, sheet_name=0)
-                        except Exception as e3:
-                            # Fallback: Maybe it is a CSV with .xlsx extension?
-                            logger.warning(f"All Excel engines failed, trying CSV fallback on {file_path}")
-                            # Try common encodings for CSV
-                            for enc in ['utf-8', 'latin-1', 'cp1252']:
-                                try:
-                                    df = pd.read_csv(file_path, encoding=enc, on_bad_lines='skip')
-                                    logger.info(f"Successfully read file as CSV with encoding {enc}")
-                                    break
-                                except:
-                                    continue
-                            if df is None:
-                                raise ValueError(f"Failed to read file as Excel or CSV. Original error: {e1}")
-            else:
-                df = pd.read_csv(file_path)
-        except Exception as e:
-            cast_csv_upload_status[fetch_id]["status"] = "error"
-            cast_csv_upload_status[fetch_id]["message"] = f"Failed to read file: {str(e)}"
-            raise e
+        # Read file using robust adapter logic
+        from csv_adapter import CSVAdapter
+        adapter = CSVAdapter()
+        df = adapter._read_file_robust(str(file_path))
 
 
         cast_csv_upload_status[fetch_id]["records_fetched"] = len(df)
@@ -469,15 +434,31 @@ async def _process_cast_csv_file(
 
         records = []
         for _, row in df.iterrows():
+            # Handle NaN values for string columns
+            country = str(row.get("country", "")) if pd.notna(row.get("country")) else "Global"
+            admin1 = str(row.get("admin1", "")) if pd.notna(row.get("admin1")) else ""
+            period_val = row.get("period")
+            
+            # Format period to string YYYY-MM-DD
+            month_str = ""
+            year_val = None
+            if pd.notna(period_val):
+                try:
+                    dt = pd.to_datetime(period_val)
+                    month_str = dt.strftime("%Y-%m-%d")
+                    year_val = int(dt.year)
+                except:
+                    month_str = str(period_val)
+            
             records.append({
-                "country": row.get("country", ""),
-                "admin1": row.get("admin1", ""),
-                "month": row.get("period", ""),            # period -> month field
-                "year": int(str(row.get("period", ""))[:4]) if row.get("period") else None,
-                "total_forecast": row.get("expected_forecast", 0),
+                "country": country,
+                "admin1": admin1,
+                "month": month_str,
+                "year": year_val,
+                "total_forecast": int(row.get("expected_forecast", 0)) if pd.notna(row.get("expected_forecast")) else 0,
                 "battles_forecast": 0,
-                "erv_forecast": 0,
-                "vac_forecast": 0,
+                "erv_forecast": int(row.get("low_forecast", 0)) if pd.notna(row.get("low_forecast")) else 0,
+                "vac_forecast": int(row.get("high_forecast", 0)) if pd.notna(row.get("high_forecast")) else 0,
                 "total_observed": 0,
                 "battles_observed": 0,
                 "erv_observed": 0,
@@ -486,10 +467,6 @@ async def _process_cast_csv_file(
                 "upload_id": fetch_id,
                 "data_source": "cast_csv_upload",
                 "processed_at": datetime.utcnow().isoformat(),
-                # Store extra CAST fields in metadata-friendly columns
-                # low / high stored as erv/vac forecast slots for compatibility
-                "erv_forecast": row.get("low_forecast", 0),
-                "vac_forecast": row.get("high_forecast", 0),
             })
 
         inserted = await db_manager.insert_cast_predictions(records)
@@ -549,19 +526,14 @@ async def _cast_csv_status_compat(fetch_id: str):
 
 
 @app.post("/api/upload/analyze")
-async def analyze_csv_structure(file: UploadFile = File(...)):
-
+async def analyze_csv_structure(
+    file: UploadFile = File(...),
+    data_type: str = "acled_events"
+):
     """Analyze CSV structure and suggest column mappings"""
     try:
-        # Validate file type
-        if not file.filename.endswith(('.csv', '.xlsx', '.xls')):
-            raise HTTPException(
-                status_code=400,
-                detail="Only CSV and Excel files are supported"
-            )
-        
         # Save temporary file
-        temp_dir = Path("temp")
+        temp_dir = BASE_DIR / "temp"
         temp_dir.mkdir(exist_ok=True)
         temp_file_path = temp_dir / f"temp_{file.filename}"
         
@@ -570,7 +542,7 @@ async def analyze_csv_structure(file: UploadFile = File(...)):
             f.write(content)
         
         # Analyze file structure
-        analysis = await data_processor.analyze_csv_file(str(temp_file_path))
+        analysis = await data_processor.analyze_csv_file(str(temp_file_path), data_type)
         
         # Clean up temp file
         try:
@@ -1099,79 +1071,17 @@ async def get_ai_insights(request: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
 
 async def get_comprehensive_context():
-    """Get comprehensive context from database for AI analysis"""
+    """Get comprehensive context from database for AI analysis using optimized SQL queries"""
     try:
-        # Get recent events (last 6 months)
-        recent_events = await db_manager.get_events(
-            filters={
-                "event_date": {
-                    "$gte": (datetime.utcnow() - timedelta(days=180)).isoformat()
-                }
-            },
-            limit=10000
-        )
+        # Get temporal trends (Last 6 months by default for AI context)
+        trends = await db_manager.get_temporal_trends(period="monthly")
         
-        if not recent_events:
-            return {"error": "No recent data available"}
+        # Get hotspots
+        hotspots_data = await db_manager.get_hotspots(threshold=5)
         
-        df = pd.DataFrame(recent_events)
-        
-        # Calculate comprehensive statistics
-        total_events = len(df)
-        total_fatalities = df['fatalities'].sum()
-        
-        # Country analysis
-        country_stats = df.groupby('country').agg({
-            'fatalities': 'sum',
-            'event_id': 'count'
-        }).rename(columns={'event_id': 'events'}).to_dict('index')
-        
-        top_countries = sorted(country_stats.items(), 
-                             key=lambda x: x[1]['fatalities'], reverse=True)[:10]
-        
-        # Event type analysis
-        event_type_stats = df.groupby('event_type').agg({
-            'fatalities': 'sum',
-            'event_id': 'count'
-        }).rename(columns={'event_id': 'events'}).to_dict('index')
-        
-        top_event_types = sorted(event_type_stats.items(), 
-                               key=lambda x: x[1]['events'], reverse=True)[:10]
-        
-        # Geographic hotspots
-        location_stats = df.groupby('location').agg({
-            'fatalities': 'sum',
-            'event_id': 'count'
-        }).rename(columns={'event_id': 'events'}).to_dict('index')
-        
-        hotspots = sorted(location_stats.items(), 
-                         key=lambda x: x[1]['fatalities'], reverse=True)[:10]
-        
-        # Recent high-impact events
-        recent_high_impact = df[df['fatalities'] > 10].sort_values(
-            'event_date', ascending=False
-        ).head(5).to_dict('records')
-        
-        # Trend analysis
-        df['event_date'] = pd.to_datetime(df['event_date'])
-        monthly_trends = df.groupby(df['event_date'].dt.to_period('M')).agg({
-            'fatalities': 'sum',
-            'event_id': 'count'
-        }).rename(columns={'event_id': 'events'})
-        
-        # Determine trend direction
-        if len(monthly_trends) >= 2:
-            recent_avg = monthly_trends.tail(2)['events'].mean()
-            earlier_avg = monthly_trends.head(max(1, len(monthly_trends)-2))['events'].mean()
-            trend_direction = "increasing" if recent_avg > earlier_avg else "decreasing"
-        else:
-            trend_direction = "stable"
-        
-        # Try to get ML predictions
+        # Get latest predictions
         ml_predictions_summary = "No ML predictions available"
         try:
-            # Get latest ML predictions if available
-            ml_pipeline = MLPipeline()
             if ml_pipeline.models:
                 predictions = await ml_pipeline.generate_predictions(horizon_days=7)
                 if predictions and 'predictions' in predictions:
@@ -1180,24 +1090,59 @@ async def get_comprehensive_context():
                     ml_predictions_summary = f"ML Model predicts {high_risk_count} high-risk areas in next 7 days"
         except:
             pass
+
+        # Get CAST predictions summary
+        cast_summary = "No CAST prediction data available"
+        try:
+            cast_preds = await db_manager.get_cast_predictions(limit=5)
+            if cast_preds:
+                cast_summary = "Latest ACLED CAST Forecasts:\n"
+                for cp in cast_preds:
+                    cast_summary += f"- {cp.get('country')}, {cp.get('admin1') or ''}: {cp.get('total_forecast', 0)} expected events in {cp.get('month', 'future')}\n"
+        except:
+            pass
+
+        # Get comprehensive stats
+        stats = await db_manager.get_comprehensive_stats()
         
+        # Basic Stats
+        total_events = sum(t['total_events'] for t in trends) if trends else 0
+        total_fatalities = sum(t['total_fatalities'] for t in trends) if trends else 0
+        
+        # Trend Direction
+        trend_direction = "stable"
+        if len(trends) >= 2:
+            if trends[-1]['total_events'] > trends[-2]['total_events'] * 1.15:
+                trend_direction = "increasing"
+            elif trends[-1]['total_events'] < trends[-2]['total_events'] * 0.85:
+                trend_direction = "decreasing"
+
+        # Recent high-impact events (already in records format)
+        recent_high_impact_raw = await db_manager.get_events(
+            filters={"fatalities": {"$gte": 10}},
+            limit=5,
+            sort_by="event_date",
+            sort_order=-1
+        )
+
         return {
             "total_events": total_events,
             "total_fatalities": int(total_fatalities),
-            "active_countries": len(country_stats),
-            "date_range": f"{df['event_date'].min().strftime('%Y-%m-%d')} to {df['event_date'].max().strftime('%Y-%m-%d')}",
+            "active_countries": stats['active_countries_count'],
+            "date_range": stats['date_range'],
             "trend_direction": trend_direction,
-            "top_countries": top_countries,
-            "top_event_types": top_event_types,
-            "hotspots": hotspots,
-            "recent_high_impact": recent_high_impact,
+            "top_countries": stats['top_countries'],
+            "top_event_types": stats['top_event_types'],
+            "hotspots": [(h['location'], {"events": h['event_count'], "fatalities": h['total_fatalities']}) for h in hotspots_data[:10]],
+            "recent_high_impact": recent_high_impact_raw,
             "ml_predictions_summary": ml_predictions_summary,
-            "data_freshness": "last_6_months",
+            "cast_predictions_summary": cast_summary,
+            "data_freshness": "Last 6 months of historical data + latest forecasts",
             "analysis_timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
-        print(f"Context generation error: {str(e)}")
+        logger.error(f"Context generation error: {str(e)}")
         return {"error": f"Failed to generate context: {str(e)}"}
 
 @app.post("/api/ai/risk-assessment")
@@ -1733,6 +1678,16 @@ async def _run_acled_fetch(
         events = df.to_dict("records")
         inserted = await db_manager.insert_events(events)
 
+        # MongoDB Atlas dual-write
+        try:
+            from database import DatabaseManager as MongoManager
+            mongo_db = MongoManager()
+            await mongo_db.initialize()
+            await mongo_db.insert_events(events)
+            logger.info(f"Dual-wrote {inserted} ACLED events to MongoDB Atlas")
+        except Exception as mongo_exc:
+            logger.error(f"MongoDB Atlas dual-write failed: {mongo_exc}")
+
         acled_fetch_status[fetch_id]["status"] = "completed"
         acled_fetch_status[fetch_id]["progress"] = 100
         acled_fetch_status[fetch_id]["records_stored"] = inserted
@@ -1751,6 +1706,49 @@ async def _run_acled_fetch(
         acled_fetch_status[fetch_id]["message"] = f"Fetch failed: {str(exc)}"
         import traceback
         traceback.print_exc()
+
+
+async def _startup_acled_sync():
+    """
+    Runs once at startup.
+    If the local DB has fewer than 100 events, automatically pulls the last
+    90 days of data from ACLED API so the dashboard has something to show.
+    """
+    import asyncio
+    await asyncio.sleep(5)  # let the server finish starting up
+    try:
+        existing = await db_manager.get_events({}, limit=100)
+        if len(existing) >= 100:
+            logger.info(f"Startup sync skipped - DB already has {len(existing)}+ events")
+            return
+
+        logger.info("Startup auto-sync: DB is sparse, pulling last 90 days from ACLED API...")
+        from datetime import timedelta
+        end_date = datetime.utcnow().strftime("%Y-%m-%d")
+        start_date = (datetime.utcnow() - timedelta(days=90)).strftime("%Y-%m-%d")
+
+        filters = {
+            "event_date": f"{start_date}|{end_date}",
+            "event_date_where": "BETWEEN",
+        }
+
+        import uuid as _uuid
+        fetch_id = f"startup_{_uuid.uuid4().hex[:8]}"
+        acled_fetch_status[fetch_id] = {
+            "fetch_id": fetch_id,
+            "status": "queued",
+            "progress": 0,
+            "records_fetched": 0,
+            "records_stored": 0,
+            "filters": filters,
+            "max_records": 10000,
+            "started_at": datetime.utcnow().isoformat(),
+            "message": "Startup auto-sync"
+        }
+        await _run_acled_fetch(fetch_id, filters, max_records=10000)
+        logger.info(f"Startup auto-sync complete: {acled_fetch_status[fetch_id].get('records_stored', 0)} events stored")
+    except Exception as exc:
+        logger.error(f"Startup auto-sync failed: {exc}")
 
 
 @app.get("/api/acled/fetch/{fetch_id}")

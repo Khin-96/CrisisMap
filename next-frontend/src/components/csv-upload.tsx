@@ -128,7 +128,9 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
     try {
       const formData = new FormData()
       formData.append('file', selectedFile)
-      const response = await fetch(`http://localhost:8000${activeConfig.analyzeEndpoint}`, {
+      formData.append('data_type', dataType)
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      const response = await fetch(`${apiUrl}${activeConfig.analyzeEndpoint}`, {
         method: 'POST',
         body: formData,
       })
@@ -157,7 +159,8 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
         formData.append('custom_mappings', JSON.stringify(customMappings))
       }
 
-      const response = await fetch(`http://localhost:8000${activeConfig.uploadEndpoint}`, {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      const response = await fetch(`${apiUrl}${activeConfig.uploadEndpoint}`, {
         method: 'POST',
         body: formData,
       })
@@ -183,7 +186,8 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
   const pollStatus = useCallback(async (jobId: string) => {
     const poll = async () => {
       try {
-        const response = await fetch(`http://localhost:8000${activeConfig.pollEndpoint(jobId)}`)
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const response = await fetch(`${apiUrl}${activeConfig.pollEndpoint(jobId)}`)
         if (response.ok) {
           const status: UploadStatus = await response.json()
           setUploadStatus(status)
@@ -260,7 +264,6 @@ export default function CSVUpload({ onUploadComplete }: { onUploadComplete?: (up
             </label>
             <input
               type="file"
-              accept=".csv,.xlsx,.xls"
               onChange={handleFileSelect}
               disabled={isUploading}
               className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 disabled:opacity-50"

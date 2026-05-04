@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 import logging
 import re
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,24 @@ class CSVAdapter:
         ],
         'notes': [
             'notes', 'description', 'details', 'comments', 'summary'
+        ],
+        'period': [
+            'period', 'time_period', 'forecast_period', 'date_period'
+        ],
+        'expected_forecast': [
+            'expected_forecast', 'forecast', 'expected', 'prediction', 'expected_events'
+        ],
+        'low_forecast': [
+            'low_forecast', 'low', 'minimum', 'lower_bound', 'low_scenario'
+        ],
+        'high_forecast': [
+            'high_forecast', 'high', 'maximum', 'upper_bound', 'high_scenario'
+        ],
+        'admin1': [
+            'admin1', 'province', 'state', 'region', 'administrative_division'
+        ],
+        'outcome': [
+            'outcome', 'event_type_forecast', 'category', 'violence_type'
         ]
     }
     
@@ -50,38 +69,67 @@ class CSVAdapter:
         self.detected_mappings = {}
         self.data_quality_report = {}
     
-    def analyze_csv(self, file_path: str) -> Dict[str, Any]:
+    def _read_file_robust(self, file_path: str) -> pd.DataFrame:
+        """Helper to robustly read Excel or CSV files with multiple strategies"""
+        df = None
+        file_lower = file_path.lower()
+        file_basename = os.path.basename(file_path)
+        
+        # Strategy 1: Try as Excel first if it looks like one or has no extension
+        if file_lower.endswith(('.xlsx', '.xls', '.xlsm')) or "." not in file_basename:
+            # We prioritize calamine for speed and robust 'Strict' format support
+            for engine in ['calamine', 'openpyxl', None, 'xlrd']:
+                try:
+                    # For CAST files, we might need to check multiple sheets
+                    if 'cast' in file_basename.lower():
+                        xl = pd.ExcelFile(file_path, engine=engine)
+                        sheet_name = 0
+                        if 'Results' in xl.sheet_names:
+                            sheet_name = 'Results'
+                        elif 'Data' in xl.sheet_names:
+                            sheet_name = 'Data'
+                        
+                        df = xl.parse(sheet_name)
+                        logger.info(f"Successfully read {file_path} (sheet: {sheet_name}) as Excel with engine {engine}")
+                        return df
+                    
+                    df = pd.read_excel(file_path, engine=engine)
+                    logger.info(f"Successfully read {file_path} as Excel with engine {engine}")
+                    return df
+                except Exception as e:
+                    logger.debug(f"Engine {engine} failed for {file_path}: {e}")
+                    continue
+        
+        # Strategy 2: Try as CSV
+        encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+        for encoding in encodings:
+            try:
+                df = pd.read_csv(file_path, encoding=encoding, on_bad_lines='skip')
+                if df is not None and len(df.columns) > 1:
+                    logger.info(f"Successfully read {file_path} as CSV with encoding {encoding}")
+                    return df
+            except Exception:
+                continue
+        
+        # Check for semi-colon delimiter
+        if df is not None and len(df.columns) <= 1:
+            try:
+                df_semi = pd.read_csv(file_path, sep=';', on_bad_lines='skip')
+                if len(df_semi.columns) > 1:
+                    return df_semi
+            except:
+                pass
+                
+        if df is None:
+            raise ValueError(f"Could not read file {file_path}. Please ensure it is a valid CSV or Excel file.")
+        return df
+    
+    def analyze_csv(self, file_path: str, data_type: str = 'acled_events') -> Dict[str, Any]:
         """
         Analyze CSV file structure and detect column mappings
         """
         try:
-            # Try different encodings
-            encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
-            df = None
-            
-            for encoding in encodings:
-                try:
-                    if file_path.lower().endswith(('.xlsx', '.xls')):
-                        try:
-                            with pd.ExcelFile(file_path) as xl:
-                                if xl.sheet_names:
-                                    df = xl.parse(xl.sheet_names[0])
-                                else:
-                                    raise ValueError("No worksheets found in Excel")
-                        except Exception as excel_err:
-                            logger.warning(f"Excel read failed for {file_path}, trying CSV fallback: {excel_err}")
-                            df = pd.read_csv(file_path, encoding=encoding, on_bad_lines='skip')
-                    else:
-                        df = pd.read_csv(file_path, encoding=encoding)
-                    break
-                except UnicodeDecodeError:
-                    continue
-                except Exception as e:
-                    logger.error(f"Failed to read file with encoding {encoding}: {e}")
-                    continue
-            
-            if df is None:
-                raise ValueError("Could not read file with any supported encoding/method")
+            df = self._read_file_robust(file_path)
             
             # Detect column mappings
             self.detected_mappings = self._detect_column_mappings(df.columns.tolist())
@@ -89,17 +137,20 @@ class CSVAdapter:
             # Generate data quality report
             self.data_quality_report = self._analyze_data_quality(df)
             
+            # Use dynamic required columns based on data_type
+            missing_required = self._get_missing_required_columns(data_type)
+            
             return {
                 'total_rows': len(df),
                 'columns': df.columns.tolist(),
                 'detected_mappings': self.detected_mappings,
                 'data_quality': self.data_quality_report,
                 'sample_data': df.head().to_dict('records'),
-                'missing_required': self._get_missing_required_columns()
+                'missing_required': missing_required
             }
             
         except Exception as e:
-            logger.error(f"Error analyzing CSV: {e}")
+            logger.error(f"Error analyzing file: {e}")
             raise
     
     def _detect_column_mappings(self, columns: List[str]) -> Dict[str, str]:
@@ -160,11 +211,16 @@ class CSVAdapter:
         
         return quality_report
     
-    def _get_missing_required_columns(self) -> List[str]:
+    def _get_missing_required_columns(self, data_type: str = 'acled_events') -> List[str]:
         """
-        Get list of required columns that are missing
+        Get list of required columns that are missing based on data type
         """
-        required = ['event_date', 'latitude', 'longitude', 'event_type', 'fatalities']
+        if data_type == 'cast_predictions':
+            required = ['country', 'period', 'expected_forecast']
+        else:
+            # Default to ACLED events
+            required = ['event_date', 'latitude', 'longitude', 'event_type', 'fatalities']
+        
         return [col for col in required if col not in self.detected_mappings]
     
     def process_csv(self, file_path: str, custom_mappings: Dict[str, str] = None) -> pd.DataFrame:
@@ -172,11 +228,8 @@ class CSVAdapter:
         Process CSV file and convert to standard format
         """
         try:
-            # Read file
-            if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
-                df = pd.read_excel(file_path)
-            else:
-                df = pd.read_csv(file_path)
+            # Read file robustly
+            df = self._read_file_robust(file_path)
             
             # Use custom mappings if provided, otherwise use detected mappings
             mappings = custom_mappings or self.detected_mappings

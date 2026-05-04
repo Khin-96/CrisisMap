@@ -23,10 +23,10 @@ class DataProcessor:
             await self.db_manager.initialize()
         return self.db_manager
     
-    async def analyze_csv_file(self, file_path: str) -> Dict[str, Any]:
+    async def analyze_csv_file(self, file_path: str, data_type: str = 'acled_events') -> Dict[str, Any]:
         """Analyze CSV file structure and provide mapping suggestions"""
         try:
-            analysis = self.csv_adapter.analyze_csv(file_path)
+            analysis = self.csv_adapter.analyze_csv(file_path, data_type)
             return analysis
         except Exception as e:
             logger.error(f"Failed to analyze CSV file: {e}")
